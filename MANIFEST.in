@@ -1,0 +1,3 @@
+include CHANGELOG.md
+graft tests
+global-exclude *.py[cod] __pycache__

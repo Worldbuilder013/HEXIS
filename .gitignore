@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+/build/
+/dist/
+.venv/
+.pytest_cache/
+.DS_Store
+
+# model endpoint credentials
+.env
+
+# run outputs and downloaded benchmark data
+/out/
+/third_party/
+*.live

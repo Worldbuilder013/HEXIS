@@ -1,0 +1,14 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the accompanying paper."
+title: "skill2fsm: Compiling Agent Skills into Extended Finite State Machines"
+type: software
+authors:
+  - name: "Anonymous Authors"
+version: "0.1.0"
+preferred-citation:
+  type: article
+  title: "Compiling Agent Skills into Extended Finite State Machines"
+  authors:
+    - name: "Anonymous Authors"
+  year: 2026
+  notes: "Under review"

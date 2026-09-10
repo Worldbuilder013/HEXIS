@@ -18,3 +18,4 @@ Initial release.
   and file-answer tasks.
 - Command-line interface: `compile`, `compile-stepwise`, `run`, `collect`, `fold-traces`, `bench`,
   `memory` and `summarize`.
+- Project documentation: security policy, contribution guide, third-party notices and citation metadata.

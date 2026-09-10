@@ -8,8 +8,9 @@ dynamic = ["version"]
 description = "Compile agent skills into extended finite state machines."
 readme = "README.md"
 requires-python = ">=3.11"
-license = "MIT"
-license-files = ["LICENSE"]
+# MIT, except the portions listed in THIRD_PARTY_NOTICES.md
+license = "MIT AND CC-BY-SA-4.0 AND Apache-2.0"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "Anonymous Authors" }]
 keywords = ["agents", "agent skills", "state machines", "EFSM", "LLM", "compilation"]
 classifiers = [

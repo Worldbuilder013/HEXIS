@@ -41,7 +41,7 @@ def fingerprint(m: Machine) -> str:
                       sorted(getattr(a, "labels", []) or []), bool(getattr(a, "observable", False))])
         for t in st.transitions:
             parts.append([sid, t.cond, t.to, t.inc or ""])
-    return hashlib.sha1(json.dumps(parts, ensure_ascii=False).encode("utf-8")).hexdigest()[:10]
+    return hashlib.sha1(json.dumps(parts, ensure_ascii=False).encode("utf-8"), usedforsecurity=False).hexdigest()[:10]
 
 
 def strip_tools(trace: Trace, names: Sequence[str]) -> Trace:

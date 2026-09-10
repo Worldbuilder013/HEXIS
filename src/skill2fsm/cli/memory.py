@@ -115,7 +115,10 @@ def judge(traj_path: pathlib.Path) -> None:
 
 
 # ------------------------------------------------------------------ AWM
-AWM_INSTRUCTION = """Given a list of tasks solved by an agent with a shell and file tools, your task is to extract the common workflows to solve these tasks. \
+#: Offline workflow-induction instruction adapted from Agent Workflow Memory (Wang et al., 2024;
+#: https://github.com/zorazrw/agent-workflow-memory, Apache-2.0). The task description is rewritten for
+#: trajectories of shell and file tools; see THIRD_PARTY_NOTICES.md.
+AWM_INSTRUCTION ="""Given a list of tasks solved by an agent with a shell and file tools, your task is to extract the common workflows to solve these tasks. \
 Each given task contains a natural language instruction, and a series of reasoning steps and tool actions to solve the task. \
 You need to find the repetitive subset of actions across multiple tasks, and extract each of them out as a workflow. \
 Each workflow should be a commonly-reused sub-routine of the tasks. Do not generate similar or overlapping workflows. \

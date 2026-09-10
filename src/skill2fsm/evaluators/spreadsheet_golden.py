@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: MIT AND CC-BY-SA-4.0
+# The value normalization, cell comparison and range helpers and the LibreOffice recalculation command
+# are adapted from SpreadsheetBench (https://github.com/RUCKBReasoning/SpreadsheetBench, CC BY-SA 4.0);
+# see THIRD_PARTY_NOTICES.md.
 """SpreadsheetBench 的金标准判定。
 
 判定是：把智能体保存下来的工作簿与金标准工作簿，在该任务声明的 ``answer_position``
@@ -31,7 +35,7 @@ class GoldenUnavailable(RuntimeError):
 
 
 # --------------------------------------------------------------------------- #
-# 取值比对：逐字取自 SpreadsheetBench 的 evaluation.py
+# 取值比对：逐字取自 SpreadsheetBench 的 evaluation.py（CC BY-SA 4.0，见 THIRD_PARTY_NOTICES.md）
 # --------------------------------------------------------------------------- #
 def _datetime_to_float(dt: datetime.datetime) -> float:
     excel_start_date = datetime.datetime(1899, 12, 30)

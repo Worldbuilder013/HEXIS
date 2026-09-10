@@ -467,13 +467,13 @@ def branch_label(rec_or_action: Any) -> str:
 
 @register_labeler("next_action_after")
 def next_action_after(trace: Trace, i: int) -> Optional[str]:
-    """``i`` 之后的第一步是哪一类动作（:func:`action_label`）——「文档说这时该判一下」的
+    """``i`` 之后的第一步是哪一类动作（:func:`branch_label`）——「文档说这时该判一下」的
     判断最通用的程序金标：金标是轨迹自己的未来，不看参考答案。``i`` 之后没有记录 ⇒ ``None``。
     """
     recs = trace.records
     if i + 1 >= len(recs) or i < -1:
         return None
-    return action_label(recs[i + 1].action or {})
+    return branch_label(recs[i + 1])
 
 
 @register_labeler("fail_attr_from_trace")

@@ -4,9 +4,9 @@
 可能错的标签。这是「一条路径至少错一次概率 ≤ Σεᵢ」里弃权作为调节阀的运行时体现。
 """
 
-from skill2fsm import runtime
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.schema import FALLBACK
+from hexis.execution import runtime
+from hexis.examples import table_clean as tc
+from hexis.machine.schema import FALLBACK
 
 
 def _run_with_abstaining_judge(task):

@@ -1,8 +1,9 @@
 """③ 初始机器全回退：起点直接进 FALLBACK，任意接受轨迹都被平凡复述。"""
 
-from skill2fsm import replay, runtime
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.schema import FALLBACK, empty_machine
+from hexis.legacy import replay
+from hexis.execution import runtime
+from hexis.examples import table_clean as tc
+from hexis.machine.schema import FALLBACK, empty_machine
 
 
 def test_empty_machine_starts_at_fallback():

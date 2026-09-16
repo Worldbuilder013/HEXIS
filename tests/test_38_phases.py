@@ -10,13 +10,13 @@
 """
 from __future__ import annotations
 
-from skill2fsm import phases
-from skill2fsm.normalize import canon_action
-from skill2fsm.replay import replay
-from skill2fsm.schema import (
+from hexis.traces import phases
+from hexis.traces.normalize import canon_action
+from hexis.legacy.replay import replay
+from hexis.machine.schema import (
     EndAction, Machine, State, ToolAction, Trace, Record, Transition, Variable,
 )
-from skill2fsm.trace_adapter import RawRun, RawStep, to_trace
+from hexis.traces.trace_adapter import RawRun, RawStep, to_trace
 
 
 def _py(code: str) -> RawStep:

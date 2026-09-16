@@ -3,7 +3,7 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "skill2fsm"
+name = "hexis-agent"
 dynamic = ["version"]
 description = "Compile agent skills into extended finite state machines."
 readme = "README.md"
@@ -32,21 +32,21 @@ dependencies = [
 [project.optional-dependencies]
 xlsx = ["openpyxl>=3.1"]                                   # SpreadsheetBench grading
 memory = ["numpy>=1.26", "sentence-transformers>=2.7"]     # ReasoningBank embedding index
-all = ["skill2fsm[xlsx,memory]"]
+all = ["hexis-agent[xlsx,memory]"]
 dev = ["pytest>=8.0", "build>=1.2", "twine>=6.1"]
 
 [project.scripts]
-skill2fsm = "skill2fsm.cli:main"
+hexis-agent = "hexis.cli:main"
 
 [tool.setuptools.dynamic]
-version = { attr = "skill2fsm.__version__" }
+version = { attr = "hexis.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"skill2fsm.backends" = ["*.json"]
-"skill2fsm.examples.table_clean" = ["SKILL.md"]
+"hexis.tools.backends" = ["*.json"]
+"hexis.examples.table_clean" = ["SKILL.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

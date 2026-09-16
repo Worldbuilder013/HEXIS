@@ -2,7 +2,7 @@
 
 全部密闭：工具定义手写在测试里，初始机器手写（不调模型），轨迹合成。检查的是：
 上下文只来自文档 / 工具定义 / 轨迹 / 规则；没有 apply 的技能照样更新；工具名原样保留；
-未知工具接口标为推断；认不出的事件不被丢掉；``skill2fsm/fsm`` 里没有任何技能或字段名。
+未知工具接口标为推断；认不出的事件不被丢掉；``hexis/compiler`` 里没有任何技能或字段名。
 """
 from __future__ import annotations
 
@@ -11,14 +11,14 @@ import re
 
 import pytest
 
-from skill2fsm.fsm import check as C
-from skill2fsm.fsm.context import build_context, parse_rules
-from skill2fsm.fsm.traces import prepare
-from skill2fsm.fsm.update import update
-from skill2fsm.schema import Machine, Record, Trace
-from skill2fsm.toolspec import ToolSpec
+from hexis.compiler import check as C
+from hexis.compiler.context import build_context, parse_rules
+from hexis.compiler.traces import prepare
+from hexis.compiler.update import update
+from hexis.machine.schema import Machine, Record, Trace
+from hexis.tools.toolspec import ToolSpec
 
-FSM_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "skill2fsm" / "fsm"
+FSM_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "hexis" / "compiler"
 
 
 # --------------------------------------------------------------------------- #

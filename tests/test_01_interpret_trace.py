@@ -1,8 +1,8 @@
 """① 解释模式产出合法轨迹 JSONL：字段齐全，工具结果由宿主填、不由模型编。"""
 
-from skill2fsm import runtime
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.schema import Trace, empty_machine
+from hexis.execution import runtime
+from hexis.examples import table_clean as tc
+from hexis.machine.schema import Trace, empty_machine
 
 
 def _run_empty(task):

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from skill2fsm.opencode_tools import OpenCodeError, OpenCodeTools, tool_result
+from hexis.tools.opencode_tools import OpenCodeError, OpenCodeTools, tool_result
 
 
 def test_result_preserves_native_error_and_exit_status():
@@ -68,8 +68,8 @@ def test_native_read_failure_is_not_reported_as_success(native, tmp_path):
 def test_xlsx_entry_uses_native_tools_and_saves_trace(tmp_path, monkeypatch):
     if not shutil.which("opencode"):
         pytest.skip("OpenCode binary required")
-    from skill2fsm.cli import run as run_fsm
-    from skill2fsm.schema import Machine, State, ToolAction, EndAction, Transition, Variable, Terminal
+    from hexis.cli import run as run_fsm
+    from hexis.machine.schema import Machine, State, ToolAction, EndAction, Transition, Variable, Terminal
     import json
 
     m = Machine(skill_id="native-smoke", initial="copy", fallback="FALLBACK", variables=[

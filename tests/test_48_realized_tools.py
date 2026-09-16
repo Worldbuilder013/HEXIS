@@ -1,8 +1,8 @@
 """模型实现的工具：机器里有、后端没有的工具，按注册表定义由模型写成一条 shell 命令交给后端执行。"""
 from __future__ import annotations
 
-from skill2fsm.backends.realized import RealizedTools
-from skill2fsm.toolspec import ToolSpec
+from hexis.tools.backends.realized import RealizedTools
+from hexis.tools.toolspec import ToolSpec
 
 
 class Native:

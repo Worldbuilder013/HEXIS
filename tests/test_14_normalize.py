@@ -6,12 +6,12 @@
 
 import json
 
-from skill2fsm import compiler, replay
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.normalize import (
+from hexis.legacy import compiler, replay
+from hexis.examples import table_clean as tc
+from hexis.traces.normalize import (
     action_writes, canon_action, canon_output, canon_tool_name, same_action,
 )
-from skill2fsm.schema import (
+from hexis.machine.schema import (
     EndAction, JudgeAction, ModelAction, Record, ToolAction, UserAction,
 )
 

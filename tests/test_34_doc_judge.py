@@ -17,8 +17,9 @@ import inspect
 
 import pytest
 
-from skill2fsm import replay, trace_adapter
-from skill2fsm.schema import (
+from hexis.legacy import replay
+from hexis.traces import trace_adapter
+from hexis.machine.schema import (
     EndAction, JudgeAction, Machine, Record, State, Terminal, ToolAction, Trace,
     Transition, Variable,
 )

@@ -1,8 +1,8 @@
 """The command-line entry point lists its commands and every command parses --help."""
 import pytest
 
-from skill2fsm import __version__
-from skill2fsm.cli import COMMANDS, main
+from hexis import __version__
+from hexis.cli import COMMANDS, main
 
 
 def test_usage_lists_every_command(capsys):
@@ -13,7 +13,7 @@ def test_usage_lists_every_command(capsys):
 
 def test_version(capsys):
     assert main(["--version"]) == 0
-    assert capsys.readouterr().out.strip() == f"skill2fsm {__version__}"
+    assert capsys.readouterr().out.strip() == f"hexis-agent {__version__}"
 
 
 def test_unknown_command_is_rejected(capsys):
@@ -26,4 +26,4 @@ def test_command_help(name, capsys):
     with pytest.raises(SystemExit) as exc:
         main([name, "--help"])
     assert exc.value.code == 0
-    assert f"skill2fsm {name}" in capsys.readouterr().out
+    assert f"hexis-agent {name}" in capsys.readouterr().out

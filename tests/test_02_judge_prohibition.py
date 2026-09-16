@@ -1,7 +1,8 @@
 """② 评判正确：客观验收对，且触犯禁止性要求（覆盖原文件）即使结果对也判拒。"""
 
-from skill2fsm import judge, runtime
-from skill2fsm.examples import table_clean as tc
+from hexis.traces import judge
+from hexis.execution import runtime
+from hexis.examples import table_clean as tc
 
 
 def _run(task):

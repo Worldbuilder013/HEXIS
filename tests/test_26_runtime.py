@@ -1,6 +1,6 @@
 """㉖ 解释器的执行侧账：每步的 meta、model 动作记什么、用量测不到就留空、回退的位置与步数。
 
-这套测试全部密闭：模型是 :class:`~skill2fsm.model_iface.ScriptedModel`（查表、无网络），工具
+这套测试全部密闭：模型是 :class:`~hexis.llm.model_iface.ScriptedModel`（查表、无网络），工具
 是进程内纯函数。它盯的是四件**报告要读、但语义上无关紧要**的事——正因为无关紧要，写错了不会
 让任何验收失败，只会让实验报告里的数字悄悄失真，所以得单独钉住：
 
@@ -10,17 +10,17 @@
 4. 回退段跑了几步、从哪个状态退进去的（交付物指标 5「回退率与位置清单」）。
 
 顺带跨检既有停机原因没被改动（与 test_01 / test_03 / test_11 的期望对齐），以及
-:mod:`skill2fsm.interpreter` 这个别名模块确实只是别名。
+:mod:`hexis.execution.interpreter` 这个别名模块确实只是别名。
 """
 
 import json
 
 import pytest
 
-from skill2fsm import interpreter, runtime
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.model_iface import ScriptedModel, ToolRegistry
-from skill2fsm.schema import (
+from hexis.execution import interpreter, runtime
+from hexis.examples import table_clean as tc
+from hexis.llm.model_iface import ScriptedModel, ToolRegistry
+from hexis.machine.schema import (
     EndAction, FALLBACK, Machine, ModelAction, State, Terminal, ToolAction,
     Transition, Variable, empty_machine,
 )
@@ -88,7 +88,7 @@ def _model() -> ScriptedModel:
 
 
 class _MeteredModel(ScriptedModel):
-    """带 ``usage()`` 的桩，形状照 :class:`~skill2fsm.llm_client.ModelAdapter` 的累计计数器。
+    """带 ``usage()`` 的桩，形状照 :class:`~hexis.llm.llm_client.ModelAdapter` 的累计计数器。
 
     ``unmeasured=True`` 模拟「端点根本没报 usage」：调用数照涨，token 停在 0——运行器必须把这种
     情况报成 ``None``，而不是照抄那个 0。
@@ -384,7 +384,7 @@ def test_state_error_from_the_fallback_segment_still_counts_its_steps():
 
 def test_replaying_a_run_is_unaffected_by_the_bookkeeping():
     """meta 不参与回放：带账的轨迹照样被产出它的机器复述（回归 test_05 的地基）。"""
-    from skill2fsm import replay
+    from hexis.legacy import replay
     task = tc.gen_tasks(1, seed=3)[0]
     fs = tc.MemFS(task["files"])
     ref = tc.reference_machine()

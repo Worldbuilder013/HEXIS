@@ -14,8 +14,9 @@ def _fixed_seed():
 @pytest.fixture
 def make_traces():
     """产一批 table_clean 轨迹（已评判）。可注入判断误差率。"""
-    from skill2fsm import judge, runtime
-    from skill2fsm.examples import table_clean as tc
+    from hexis.traces import judge
+    from hexis.execution import runtime
+    from hexis.examples import table_clean as tc
 
     def _make(n, *, seed=0, error_rate=0.0):
         refm = tc.reference_machine()

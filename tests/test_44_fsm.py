@@ -1,4 +1,4 @@
-"""skill2fsm.fsm：初始化与更新算法的密闭回归（不调模型、不联网）。
+"""hexis.compiler：初始化与更新算法的密闭回归（不调模型、不联网）。
 
 用一份文件修改类的小技能做夹具：两个注册表工具（``run`` 跑命令、``put`` 写文件），一份
 规则（修改后读产出 = verify 标签；已验证终点要求它成功）。这里检查算法本身：三值护卫、
@@ -10,16 +10,16 @@ import json
 
 import pytest
 
-from skill2fsm.fsm import check as C
-from skill2fsm.fsm.align import align
-from skill2fsm.fsm.common import maybe_true, takeable, truth
-from skill2fsm.fsm.context import build_context, parse_rules
-from skill2fsm.fsm.init import g_init, normalize
-from skill2fsm.fsm.modify import Builder, build_candidate
-from skill2fsm.fsm.traces import end_state_for, prepare, segment_trace
-from skill2fsm.fsm.update import update
-from skill2fsm.schema import Machine, Record, Trace
-from skill2fsm.toolspec import ToolSpec
+from hexis.compiler import check as C
+from hexis.compiler.align import align
+from hexis.compiler.common import maybe_true, takeable, truth
+from hexis.compiler.context import build_context, parse_rules
+from hexis.compiler.init import g_init, normalize
+from hexis.compiler.modify import Builder, build_candidate
+from hexis.compiler.traces import end_state_for, prepare, segment_trace
+from hexis.compiler.update import update
+from hexis.machine.schema import Machine, Record, Trace
+from hexis.tools.toolspec import ToolSpec
 
 INPUTS = {"request": "r", "src": "/w/in.dat", "dst": "/w/out.dat"}
 RULES = {
@@ -270,8 +270,8 @@ def test_build_candidate_keeps_original_untouched():
     ("put", {"path": "out.dat", "content": "c"}, {"content"}),
 ])
 def test_tool_template_from_registry_and_task_inputs(name, args, generated):
-    from skill2fsm import runtime
-    from skill2fsm.model_iface import ScriptedModel
+    from hexis.execution import runtime
+    from hexis.llm.model_iface import ScriptedModel
     tr = make_trace([Record(step=1, action={"kind": "tool", "name": name, "input": args},
                             output={"ok": True, "code": 0, "out": "o"}), _end(2)])
     ctx = context(tr)

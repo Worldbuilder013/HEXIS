@@ -1,8 +1,8 @@
 """回退态是重试枢纽，不是终结：回到最近工具步的入口重来，清零触发回退的计数；用完才解释执行或停机。"""
 from __future__ import annotations
 
-from skill2fsm import runtime
-from skill2fsm.schema import Machine
+from hexis.execution import runtime
+from hexis.machine.schema import Machine
 
 
 def machine() -> Machine:

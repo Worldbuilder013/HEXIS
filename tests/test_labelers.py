@@ -1,6 +1,6 @@
 """Program labelers run on plain traces without a machine or model."""
-from skill2fsm.schema import Record, Trace
-from skill2fsm.trace_adapter import LABELERS, branch_label
+from hexis.machine.schema import Record, Trace
+from hexis.traces.trace_adapter import LABELERS, branch_label
 
 
 def test_next_action_after_labels_the_following_step():

@@ -14,8 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from skill2fsm import env as envmod
-from skill2fsm.llm_client import (
+from hexis.llm import env as envmod
+from hexis.llm.llm_client import (
     Completion,
     LLMError,
     LLMHTTPError,
@@ -24,7 +24,7 @@ from skill2fsm.llm_client import (
     _split_inline_thinking,
     extract_json,
 )
-from skill2fsm.model_iface import Model, ScriptedModel
+from hexis.llm.model_iface import Model, ScriptedModel
 
 ROOT = Path(__file__).resolve().parents[1]
 FAKE_KEY = "sk-fake-secret-abcd1234"
@@ -445,7 +445,7 @@ def test_the_key_only_travels_in_the_authorization_header():
 
 
 def test_llm_config_profile_reads_prefixed_keys_with_defaults():
-    from skill2fsm.env import EnvError, llm_config
+    from hexis.llm.env import EnvError, llm_config
     cfg = llm_config(environ={"MINIMAX_API_KEY": "k-1234"}, profile="minimax")
     assert cfg.model == "MiniMax-M2.5-highspeed" and cfg.base_url.endswith("/v1")
     cfg = llm_config(environ={"MINIMAX_API_KEY": "k", "MINIMAX_MODEL": "MiniMax-M3"}, profile="minimax")

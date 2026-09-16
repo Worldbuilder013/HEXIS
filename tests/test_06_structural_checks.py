@@ -1,8 +1,8 @@
 """⑥ 结构检查：条件互斥完备、修复环带上限、变量先写后读，坏机器逐条报出。"""
 
-from skill2fsm import checks
-from skill2fsm.examples import table_clean as tc
-from skill2fsm.schema import EndAction, State, Transition, empty_machine
+from hexis.machine import checks
+from hexis.examples import table_clean as tc
+from hexis.machine.schema import EndAction, State, Transition, empty_machine
 
 
 def test_reference_and_empty_machines_are_clean():

@@ -1,19 +1,20 @@
-"""⑦ 撤销生效：注入使校验失败的轨迹，扩展被整轮回滚，机器不变。"""
+"""Undo takes effect: inject a trace that makes validation fail, the extension is rolled back for the whole round, and the machine is unchanged."""
 
-from hexis.legacy import compiler
 from hexis.examples import table_clean as tc
+from hexis.legacy import compiler
 from hexis.machine.schema import Record, Trace
 
 _V = {"path": "z.csv", "output_path": "o.csv", "request": "r"}
 
 
 def _ghost_trace() -> Trace:
-    """一条会让先写后读检查失败的接受轨迹：判断动作声称要读一个从没被写的 ghost 变量。
+    """An accepted trace that makes the write-before-read check fail: the judge action claims to read a ghost variable that is never written.
 
-    它做成**最短**并放在轨迹列表最前，好让它先给判断状态定 reads（编译按短轨迹优先、
-    首见定形）。
+    It is made the **shortest** and placed first in the trace list, so that it is the one that sets
+    the judge state's reads (compilation goes shortest trace first, and the first sighting fixes the
+    shape).
     """
-    hv = {"header_row": "名称,数量", "rows": [["a", "1"]]}
+    hv = {"header_row": "name,quantity", "rows": [["a", "1"]]}
     return Trace(task={"input": dict(_V)}, verdict="accepted", records=[
         Record(step=1, state="a",
                action={"kind": "tool", "name": "read_csv", "input": {"path": "z.csv"}},
@@ -21,13 +22,13 @@ def _ghost_trace() -> Trace:
         Record(step=2, state="b",
                action={"kind": "judge", "prompt": tc.JUDGE_Q,
                        "reads": ["header_row", "ghost"]},
-               output={"header_ok": "规范"}, vars={**_V, **hv, "header_ok": "规范"}),
+               output={"header_ok": "well_formed"}, vars={**_V, **hv, "header_ok": "well_formed"}),
         Record(step=3, state="c",
                action={"kind": "tool", "name": "export",
-                       "input": {"header_row": "名称,数量", "rows": [["a", "1"]],
+                       "input": {"header_row": "name,quantity", "rows": [["a", "1"]],
                                  "output_path": "o.csv", "source_path": "z.csv"}},
                output={"ok": True, "output_path": "o.csv"},
-               vars={**_V, **hv, "header_ok": "规范"}),
+               vars={**_V, **hv, "header_ok": "well_formed"}),
         Record(step=4, state="d", action={"kind": "end", "terminal": "done"},
                vars=dict(_V)),
     ])
@@ -51,6 +52,6 @@ def test_failing_round_rolls_back_and_base_is_untouched(accepted):
         prohibitions=tc.reference_machine().prohibitions)
 
     assert not applied
-    assert res.machine is base                              # 整轮回滚
-    assert base.model_dump_json(by_alias=True) == before    # 机器逐字节不变
-    assert any("ghost" in f for f in res.findings)          # 驳回附理由
+    assert res.machine is base                              # whole round rolled back
+    assert base.model_dump_json(by_alias=True) == before    # machine unchanged byte for byte
+    assert any("ghost" in f for f in res.findings)          # the rejection comes with a reason

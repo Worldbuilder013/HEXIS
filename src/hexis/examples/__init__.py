@@ -1,1 +1,1 @@
-"""hexis 自带的玩具技能，用于密闭自测。"""
+"""Toy skills bundled with hexis for hermetic self-tests."""

@@ -1,18 +1,24 @@
-"""编译上下文：这份技能的编译输入，全部来自文档、工具定义、轨迹与显式规则。
+"""Compile context: the compile inputs of one skill, all taken from the document, tool definitions, traces and
+explicit rules.
 
-编译器不预设技能处理文件、执行修改或用某个库。它知道的只有：
+The compiler does not assume that a skill processes files, makes modifications or uses some library. All it knows is:
 
-* 任务输入字段        ← 轨迹头部的 ``task.input``（只说明出现过，``present_in`` 记次数）
-* 工具及其接口        ← 工具注册表 / 后端定义（接口保证），轨迹观察补充（推断，不是保证）
-* 标签规则            ← 技能规则：给事件打派生标签（如「修改之后读产出」），附文档原文
-* 必须执行的步骤      ← 技能规则：must_occur / before / forbid，附文档原文
-* 完成与验收条件      ← 技能规则：进入某终点需要哪些证据、哪些事件使证据失效
+* task input fields               ← ``task.input`` in trace headers (only that a field appeared; ``present_in``
+                                    counts occurrences)
+* tools and their interfaces      ← the tool registry / backend definitions (guaranteed by the interface),
+                                    supplemented by trace observations (inferred, not guaranteed)
+* label rules                     ← skill rules: give events derived labels (such as "read the output after a
+                                    modification"), with document quotes
+* steps that must be performed    ← skill rules: must_occur / before / forbid, with document quotes
+* completion and acceptance       ← skill rules: which evidence a terminal needs and which events invalidate it
 
-规则来自技能目录里的 ``compile.json``、``--rules`` 文件，或初始化时由模型从文档抽取并经
-原文核对（见 :mod:`.init`）。更新算法本身只执行这些检查，不含任何技能名称判断。
+Rules come from ``compile.json`` in the skill directory, a ``--rules`` file, or are extracted from the document by
+the model during initialization and verified against their quotes (see :mod:`.init`). The update algorithm itself
+only runs these checks and makes no decisions based on skill names.
 
-事件模式（:class:`EventPattern`）是规则的原子：按事件类型、工具名、标签、参数文本、成败匹配。
-``args_contain`` 里的 ``${field}`` 按当前任务的输入取值代入（路径类取值同时认最后一段文件名）。
+Event patterns (:class:`EventPattern`) are the atoms of rules: they match on event kind, tool name, label, argument
+text and outcome. ``${field}`` in ``args_contain`` is substituted with the current task's input value (for path-like
+values the last segment, the file name, also matches).
 """
 from __future__ import annotations
 
@@ -30,7 +36,7 @@ _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 # --------------------------------------------------------------------------- #
-# 数据结构
+# Data structures
 # --------------------------------------------------------------------------- #
 @dataclass
 class FieldSpec:
@@ -49,12 +55,12 @@ class FieldSpec:
 class EventPattern:
     kind: Optional[str] = None            # tool / model / judge / user / end
     tool: Optional[str] = None
-    label: Optional[str] = None           # 基础或派生标签
-    role: Optional[str] = None            # model 事件：narration / output
-    args_contain: Optional[str] = None    # 参数文本须包含（可含 ${field}）
+    label: Optional[str] = None           # base or derived label
+    role: Optional[str] = None            # model events: narration / output
+    args_contain: Optional[str] = None    # the argument text must contain this (may contain ${field})
     arg_regex: Optional[str] = None
     success: Optional[bool] = None
-    after: Optional["EventPattern"] = None    # 之前须出现过匹配它的事件
+    after: Optional["EventPattern"] = None    # an event matching it must have occurred earlier
 
     def to_dict(self) -> dict:
         d = {k: v for k, v in self.__dict__.items() if v is not None and k != "after"}
@@ -74,7 +80,7 @@ class EventPattern:
         parts = [f"{k}={v!r}" for k, v in self.to_dict().items() if k != "after"]
         if self.after is not None:
             parts.append(f"after=({self.after.describe()})")
-        return " ".join(parts) or "任意事件"
+        return " ".join(parts) or "any event"
 
 
 @dataclass
@@ -96,7 +102,7 @@ class Requirement:
 
     def describe(self) -> str:
         if self.kind == "before":
-            return f"{self.id}: ({self.a.describe()}) 须先于 ({self.b.describe() if self.b else ''})"
+            return f"{self.id}: ({self.a.describe()}) must precede ({self.b.describe() if self.b else ''})"
         return f"{self.id}: {self.kind} ({self.a.describe()})"
 
 
@@ -124,7 +130,7 @@ class CompileContext:
     n_traces: int = 0
     notes: list = field(default_factory=list)
 
-    # ---- 便捷 ---- #
+    # ---- conveniences ---- #
     def spec(self, tool: str) -> ToolSpec:
         s = self.tools.get(tool)
         if s is None:
@@ -136,7 +142,7 @@ class CompileContext:
         return list(self.task_inputs)
 
     def default_terminal(self) -> str:
-        """没有证据条件的首个非回退终点。"""
+        """The first non-fallback terminal without evidence conditions."""
         conditioned = {tc.terminal for tc in self.terminal_conditions if tc.required_evidence}
         for t in self.terminals:
             if t["id"] not in conditioned and t.get("kind") != "fallback":
@@ -147,7 +153,7 @@ class CompileContext:
         return [tc.terminal for tc in self.terminal_conditions if tc.required_evidence]
 
     def patterns(self) -> list[EventPattern]:
-        """规则里出现的全部模式（判「必经状态」用）。"""
+        """All patterns that appear in the rules (used to decide the "required states")."""
         out: list[EventPattern] = []
         for r in self.requirements:
             out.append(r.a)
@@ -185,15 +191,15 @@ def _clip(v: Any, n: int = 120) -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# 规则文件
+# Rule files
 # --------------------------------------------------------------------------- #
 def parse_rules(data: Mapping, *, source: str = "rules") -> dict:
-    """规则 JSON → (terminals, label_rules, requirements, terminal_conditions)。"""
+    """Rules JSON → (terminals, label_rules, requirements, terminal_conditions)."""
     terminals = [dict(t) if isinstance(t, Mapping) else {"id": str(t), "kind": ""}
                  for t in (data.get("terminals") or [])]
     labels = [LabelRule(label=str(r["label"]), when=EventPattern.from_dict(r.get("when") or {}),
                         quote=str(r.get("quote") or ""), source=source)
-              for r in (data.get("labels") or []) if r.get("label")]
+              for r in (data.get("labels") or data.get("label_rules") or []) if r.get("label")]
     reqs = []
     for i, r in enumerate(data.get("requirements") or [], 1):
         kind = str(r.get("kind") or "must_occur")
@@ -212,22 +218,40 @@ def parse_rules(data: Mapping, *, source: str = "rules") -> dict:
             "terminal_conditions": tcs}
 
 
+def _is_parsed(rules: Any) -> bool:
+    """True for the output of :func:`parse_rules`, False for rules JSON (which may also use the key label_rules)."""
+    if not isinstance(rules, dict) or "label_rules" not in rules:
+        return False
+    items = list(rules.get("label_rules") or []) + list(rules.get("requirements") or []) \
+        + list(rules.get("terminal_conditions") or [])
+    return all(isinstance(x, (LabelRule, Requirement, TerminalCondition)) for x in items)
+
+
+def rules_dict(ctx: "CompileContext") -> dict:
+    """The context's skill rules in the rules JSON format (``compile.json``) that :func:`load_rules` reads."""
+    d = ctx.to_dict()
+    return {"terminals": d["terminals"], "labels": d["label_rules"], "requirements": d["requirements"],
+            "terminal_conditions": d["terminal_conditions"]}
+
+
 def load_rules(path: Any) -> dict:
     return parse_rules(json.loads(Path(path).read_text(encoding="utf-8")))
 
 
 def quote_in_document(quote: str, doc: str) -> bool:
-    """原文核对：忽略空白差异后是文档的子串。空引文不算。"""
+    """Quote verification: a substring of the document once whitespace differences are ignored. An empty quote does
+    not count."""
     norm = lambda s: re.sub(r"\s+", " ", s or "").strip().lower()
     q = norm(quote)
     return bool(q) and q in norm(doc)
 
 
 # --------------------------------------------------------------------------- #
-# 事件匹配（动态：在轨迹事件上）
+# Event matching (dynamic: on trace events)
 # --------------------------------------------------------------------------- #
 def substitute(template: str, task_input: Mapping) -> list[str]:
-    """``${field}`` 代入任务输入。路径类取值另给一个只含最后一段的版本。返回可选的文本列表。"""
+    """Substitute task inputs for ``${field}``. Path-like values also get a variant with only the last segment.
+    Returns the list of possible texts."""
     if not template:
         return []
     outs = [template]
@@ -244,7 +268,7 @@ def substitute(template: str, task_input: Mapping) -> list[str]:
 
 
 def event_matches(pat: EventPattern, ev: Any, task_input: Mapping, earlier: Sequence[Any] = ()) -> bool:
-    """事件 ``ev`` 是否匹配模式。``ev`` 须有 kind / tool / label / labels / role / ok / args_text。"""
+    """Whether event ``ev`` matches the pattern. ``ev`` must have kind / tool / label / labels / role / ok / args_text."""
     if pat.kind is not None and getattr(ev, "kind", None) != pat.kind:
         return False
     if pat.tool is not None and getattr(ev, "tool", None) != pat.tool:
@@ -275,7 +299,8 @@ def event_matches(pat: EventPattern, ev: Any, task_input: Mapping, earlier: Sequ
 
 
 def apply_labels(events: Sequence[Any], ctx: CompileContext, task_input: Mapping) -> None:
-    """按标签规则给事件加派生标签（就地，按规则顺序，后面的规则能看到前面的标签）。"""
+    """Add derived labels to events according to the label rules (in place, in rule order; later rules see the labels
+    added by earlier ones)."""
     for i, ev in enumerate(events):
         if not hasattr(ev, "labels"):
             continue
@@ -285,25 +310,26 @@ def apply_labels(events: Sequence[Any], ctx: CompileContext, task_input: Mapping
 
 
 def check_requirements(events: Sequence[Any], ctx: CompileContext, task_input: Mapping) -> list[str]:
-    """轨迹违反了哪些要求。返回说明列表（空 = 全满足）。"""
+    """Which requirements a trace violates. Returns a list of explanations (empty = all satisfied)."""
     out: list[str] = []
     for r in ctx.requirements:
         hits_a = [i for i, e in enumerate(events) if event_matches(r.a, e, task_input, events[:i])]
         if r.kind == "must_occur" and not hits_a:
-            out.append(f"{r.id}: 缺少必须出现的事件 ({r.a.describe()})" + (f"「{r.quote}」" if r.quote else ""))
+            out.append(f"{r.id}: missing required event ({r.a.describe()})" + (f" \"{r.quote}\"" if r.quote else ""))
         elif r.kind == "forbid" and hits_a:
-            out.append(f"{r.id}: 出现了禁止的事件 ({r.a.describe()})" + (f"「{r.quote}」" if r.quote else ""))
+            out.append(f"{r.id}: forbidden event occurred ({r.a.describe()})" + (f" \"{r.quote}\"" if r.quote else ""))
         elif r.kind == "before" and r.b is not None:
             for j, e in enumerate(events):
                 if event_matches(r.b, e, task_input, events[:j]) and not any(i < j for i in hits_a):
-                    out.append(f"{r.id}: 第 {j + 1} 个事件 ({r.b.describe()}) 之前没有 ({r.a.describe()})"
-                               + (f"「{r.quote}」" if r.quote else ""))
+                    out.append(f"{r.id}: event {j + 1} ({r.b.describe()}) is not preceded by ({r.a.describe()})"
+                               + (f" \"{r.quote}\"" if r.quote else ""))
                     break
     return out
 
 
 def evidence_held(events: Sequence[Any], ctx: CompileContext, task_input: Mapping) -> set:
-    """走完全部事件后仍成立的证据 {(terminal, i)}。成功的证据事件加入，失效事件与失败的证据事件移除。"""
+    """Evidence {(terminal, i)} still held after all events. Successful evidence events add it; invalidating events and
+    failed evidence events remove it."""
     held: set = set()
     for j, ev in enumerate(events):
         earlier = events[:j]
@@ -324,7 +350,7 @@ def evidence_held(events: Sequence[Any], ctx: CompileContext, task_input: Mappin
 
 
 def terminal_for(events: Sequence[Any], ctx: CompileContext, task_input: Mapping) -> tuple[str, set]:
-    """τ*(T)：证据齐全的首个带条件终点；没有就是默认终点。"""
+    """τ*(T): the first conditioned terminal whose evidence is complete; otherwise the default terminal."""
     held = evidence_held(events, ctx, task_input)
     for tc in ctx.terminal_conditions:
         if tc.required_evidence and all((tc.terminal, i) in held for i in range(len(tc.required_evidence))):
@@ -333,7 +359,7 @@ def terminal_for(events: Sequence[Any], ctx: CompileContext, task_input: Mapping
 
 
 # --------------------------------------------------------------------------- #
-# 构造上下文
+# Building the context
 # --------------------------------------------------------------------------- #
 def _args_text(inp: Any) -> str:
     try:
@@ -345,7 +371,8 @@ def _args_text(inp: Any) -> str:
 def build_context(skill_id: str, skill_text: str, clauses: Sequence[tuple], traces: Iterable[Any], *,
                   registry: Optional[Mapping[str, ToolSpec]] = None,
                   rules: Optional[Mapping] = None) -> CompileContext:
-    """从技能文档、工具注册表、轨迹与规则构造编译上下文。``traces`` 是 Trace 对象序列。"""
+    """Build the compile context from the skill document, the tool registry, traces and rules. ``traces`` is a
+    sequence of Trace objects."""
     ctx = CompileContext(skill_id=skill_id, skill_text=skill_text, clauses=list(clauses))
     for name, spec in (registry or {}).items():
         ctx.tools[name] = ToolSpec(**{**spec.__dict__, "observed_inputs": Counter(),
@@ -368,14 +395,14 @@ def build_context(skill_id: str, skill_text: str, clauses: Sequence[tuple], trac
     for fs in ctx.task_inputs.values():
         fs.total = len(traces)
     if rules:
-        parsed = parse_rules(rules) if not isinstance(rules, dict) or "label_rules" not in rules else rules
+        parsed = rules if _is_parsed(rules) else parse_rules(rules)
         ctx.terminals = list(parsed["terminals"])
         ctx.label_rules = list(parsed["label_rules"])
         ctx.requirements = list(parsed["requirements"])
         ctx.terminal_conditions = list(parsed["terminal_conditions"])
     if not ctx.terminals:
         ctx.terminals = [{"id": "done", "kind": "done"}]
-        ctx.notes.append("规则没有给终点表，用单一终点 done")
+        ctx.notes.append("the rules give no terminal table, using the single terminal done")
     known = {t["id"] for t in ctx.terminals}
     for tc in ctx.terminal_conditions:
         if tc.terminal not in known:
@@ -383,14 +410,14 @@ def build_context(skill_id: str, skill_text: str, clauses: Sequence[tuple], trac
             known.add(tc.terminal)
     inferred = sorted(n for n, s in ctx.tools.items() if s.source == "inferred")
     if inferred:
-        ctx.notes.append(f"工具 {inferred} 没有注册表定义，接口只来自轨迹观察，不是保证")
+        ctx.notes.append(f"tools {inferred} have no registry definition: their interface comes only from trace observations and is not guaranteed")
     for k, v in ctx.task_inputs.items():
         if not v.always_present:
-            ctx.notes.append(f"任务输入 {k} 只在 {v.present_in}/{v.total} 条轨迹里出现")
+            ctx.notes.append(f"task input {k} appears in only {v.present_in}/{v.total} traces")
     return ctx
 
 
 __all__ = ["CompileContext", "EventPattern", "FieldSpec", "LabelRule", "Requirement",
            "STATUS_KEYS", "TerminalCondition", "apply_labels", "build_context", "check_requirements",
-           "event_matches", "evidence_held", "load_rules", "parse_rules", "quote_in_document",
+           "event_matches", "evidence_held", "load_rules", "parse_rules", "quote_in_document", "rules_dict",
            "substitute", "terminal_for"]

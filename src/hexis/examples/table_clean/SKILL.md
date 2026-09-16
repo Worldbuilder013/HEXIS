@@ -1,38 +1,44 @@
 ---
 name: table-clean
-description: 清洗一张 CSV 表：读入、检查并修复表头、导出。
-trigger: 当用户要求整理/清洗一个 CSV 表格文件时
+description: Clean a CSV table by reading it, checking and repairing its header, and writing the result to a new file.
+trigger: When the user asks to tidy up or clean a CSV table file
 ---
 
-# 表格清洗
+# Table Cleaning
 
-把一张 CSV 表整理规范后导出。整个流程围绕表头做文章：先读进来，检查表头是否规范，不规范
-就逐处修复再复查，直到规范或修够上限，最后导出到新文件。
+Tidy up a CSV table and write the result to a new file. The whole process revolves around the
+header: read the table in, check whether the header is well-formed, and if it is not, repair it
+one spot at a time and check again, until it is well-formed or the repair bound is reached;
+finally write the result to a new file.
 
-## S1 读取
+## S1 Read
 
-用 `read_csv` 读入 `path` 指向的文件，取第一行为表头行（`header_row`），其余为数据行
-（`rows`）。
+Use `read_csv` to read the file that `path` points to. Take the first line as the header row
+(`header_row`) and the remaining lines as data rows (`rows`).
 
-## S2 表头检查
+## S2 Header check
 
-判断当前 `header_row` 是否规范。
+Decide whether the current `header_row` is well-formed.
 
-### S2.1 规范判据
+### S2.1 Well-formedness criterion
 
-表头规范当且仅当：字段以逗号分隔，每个字段名非空，且不含占位标记 `Unnamed`。含空字段或
-`Unnamed` 的表头不规范。
+A header is well-formed if and only if its fields are separated by commas, every field name is
+non-empty, and no field contains the placeholder mark `Unnamed`. A header with an empty field or
+with `Unnamed` is malformed.
 
-## S3 修复
+## S3 Repair
 
-若表头不规范，用 `fix_header` 修复，然后**回到 S2 重新检查**。每次修复只处理一处，因此坏
-字段多时需要多轮。修复次数（`fix_count`）不得超过 3 次；到达上限仍不规范时不再修。
+If the header is malformed, repair it with `fix_header`, then **go back to S2 and check again**.
+Each repair handles only one spot, so a header with many bad fields needs several rounds. The
+number of repairs (`fix_count`) must not exceed 3; if the header is still malformed when the
+bound is reached, stop repairing.
 
-## S4 导出
+## S4 Export
 
-表头规范后，用 `export` 把结果写入 `output_path`。
+Once the header is well-formed, use `export` to write the result to `output_path`.
 
-## P1 禁止性要求
+## P1 Prohibition
 
-**不得覆盖原文件。** `export` 的目标路径 `output_path` 不得等于源文件路径 `path`。即便结果
-正确，一旦导出目标就是原文件，本次执行判为拒绝。
+**Never overwrite the source file.** The target path of `export`, `output_path`, must not equal
+the source file path `path`. Even if the result is correct, a run whose export target is the
+source file is judged as rejected.

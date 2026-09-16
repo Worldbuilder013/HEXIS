@@ -1,8 +1,9 @@
-"""hexis.compiler：初始化与更新算法的密闭回归（不调模型、不联网）。
+"""hexis.compiler: hermetic regression tests of the initialization and update algorithms (no model calls, no network).
 
-用一份文件修改类的小技能做夹具：两个注册表工具（``run`` 跑命令、``put`` 写文件），一份
-规则（修改后读产出 = verify 标签；已验证终点要求它成功）。这里检查算法本身：三值护卫、
-事件化、对齐代价、候选构造、检查、回放、接受规则。技能无关性的回归在 test_46。
+The fixture is a small file-modification skill: two registry tools (``run`` runs a command, ``put`` writes a file)
+and one set of rules (reading the output after a modification = the verify label; the verified terminal requires it
+to succeed). This checks the algorithm itself: three-valued guards, event segmentation, alignment costs, candidate
+construction, checks, replay and the acceptance rule. The skill-independence regression tests are in test_46.
 """
 from __future__ import annotations
 
@@ -151,7 +152,7 @@ def test_derived_label_and_terminal_selection():
     p2 = prepare(make_trace([_run(1, "cat /w/in.dat"), _put(2), _end(3)]), ctx)
     assert p2.tau == "END_UNVERIFIED" and p2.violation is None
     p3 = prepare(make_trace([_put(1), _end(2, "END_VERIFIED")]), ctx)
-    assert p3.violation                                               # 声明已验证却没有证据
+    assert p3.violation                                               # claims verified without evidence
 
 
 def test_end_state_selection_falls_back():
@@ -185,7 +186,7 @@ def test_alignment_prefers_tool_change_over_new_state():
                             output={"ok": True, "code": 0, "out": ""}),
                      _run(3, "cat /w/out.dat"), _end(4)])
     p = prepare(tr, ctx)
-    assert p.tool_events[1].label == "apply"                             # 通用命令按写操作分标签
+    assert p.tool_events[1].label == "apply"                             # generic commands are labelled by write operations
     al, _ = align(m, p, ctx, allow_realize=True)
     assert al.slots[1].how == "realize" and al.slots[1].state == "s4" and al.cost == 1
     al2, _ = align(m, p, ctx, allow_realize=False)

@@ -39,8 +39,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from hexis.cli.collect import (AGENT, PROMPT_HEAD, PROMPT_HEAD_FILETASK, PROMPT_HEAD_LIVEMATH,
-                                   agent_config, task_prompt)
+from hexis.cli.collect import AGENT, PROMPT_HEAD, PROMPT_HEAD_FILETASK, PROMPT_HEAD_LIVEMATH, agent_config, task_prompt
 from hexis.cli.run import DEFAULT_BENCH_DIR
 
 MODE = {"name": "xlsx", "tasks_file": None}          # set from --mode / --tasks-file

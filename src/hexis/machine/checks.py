@@ -1,20 +1,24 @@
-"""结构检查：确定性、免费，编译每动一次就跑一遍。空列表 = 全过。
+"""Structural checks: deterministic and free, run after every compile edit. Empty list = all pass.
 
-图那一层的问题——「产物里有一部分够不着 / 停不下来 / 走投无路」——在状态机上是可达性、
-可终止、转移完备三条纯图算法。数据那一层是两条声明比对：**互斥完备**（定理2：同一状态各
-带条件出边两两不同时成立、且合起来盖满所有格局）与**先写后读**（一个状态要读的变量，在
-通往它的每条路径上都已被写过）。
+Graph-level problems ("part of the artifact cannot be reached / cannot stop / has nowhere to
+go") are three pure graph algorithms on the machine: reachability, termination and transition
+completeness. Data-level problems are two declaration checks: **mutual exclusion and
+completeness** (Theorem 2: the guarded outgoing edges of a state are pairwise never true at the
+same time, and together they cover every configuration) and **write before read** (every
+variable a state reads has already been written on every path leading to it).
 
-互斥完备靠把「无穷的变量取值」压成「有限的格局」再逐个枚举——压缩依据是条件里出现的原子
-谓词（见 :mod:`hexis.machine.cond`）。一个数值变量只在它被比较的那几个阈值处才可能翻转某条边
-的真假，阈值之间取一个代表值即可；一个判断动作写入的变量只在它那有限个标签里取值。
+Mutual exclusion and completeness work by compressing "infinitely many variable values" into
+"finitely many configurations" and enumerating them; the compression is based on the atomic
+predicates in the guards (see :mod:`hexis.machine.cond`). A numeric variable can only flip an
+edge's truth value at the thresholds it is compared against, so one representative value
+between thresholds suffices; a variable written by a judge action only takes values from its
+finite label set.
 """
 
 from __future__ import annotations
 
-import re
-
 import itertools
+import re
 from typing import Any, Optional
 
 from hexis.machine import cond
@@ -22,14 +26,15 @@ from hexis.machine.schema import Machine
 
 
 def structural_findings(machine: Machine) -> list[str]:
-    """图与数据流上能确定性判掉的问题。空列表表示全过。"""
+    """Graph and data-flow problems decidable deterministically. Empty list = all pass."""
     out: list[str] = []
     if machine.initial not in machine.states:
-        return [f"initial 指向不存在的状态 {machine.initial!r}"]
+        return [f"initial points to a missing state {machine.initial!r}"]
     for t in machine.transitions_all():
         for side, sid in (("from", t[0]), ("to", t[1].to)):
             if sid not in machine.states:
-                out.append(f"转移 {t[0]}→{t[1].to} 的 {side} 指向不存在的状态 {sid!r}")
+                out.append(f"transition {t[0]}→{t[1].to}: {side} points to a missing state "
+                           f"{sid!r}")
     if out:
         return out
 
@@ -37,7 +42,7 @@ def structural_findings(machine: Machine) -> list[str]:
     out += _reachability(machine, reachable)
     out += _termination(machine, reachable)
     out += _completeness(machine, reachable)
-    out += _determinism(machine, reachable)          # 互斥完备（定理2）
+    out += _determinism(machine, reachable)          # mutual exclusion and completeness (Theorem 2)
     out += _loop_bounds(machine, reachable)
     out += _write_before_read(machine, reachable)
     out += _output_completeness(machine, reachable)
@@ -57,8 +62,10 @@ def _reachable(machine: Machine) -> set[str]:
 
 
 def _reachability(machine: Machine, reachable: set[str]) -> list[str]:
-    """FALLBACK 是保留状态：暂时没有边指向它不算死代码——机器长着长着就会接过去。"""
-    return [f"状态 {sid} 从 {machine.initial} 走不到：死代码，删掉或接上一条边"
+    """FALLBACK is a reserved state: having no edge into it yet is not dead code (the machine
+    connects to it as it grows)."""
+    return [f"state {sid} is unreachable from {machine.initial}: dead code, delete it or "
+            "connect it with an edge"
             for sid in sorted(set(machine.states) - reachable)
             if sid != machine.fallback]
 
@@ -66,7 +73,7 @@ def _reachability(machine: Machine, reachable: set[str]) -> list[str]:
 def _termination(machine: Machine, reachable: set[str]) -> list[str]:
     terminals = {sid for sid, s in machine.states.items() if s.action.kind == "end"}
     if not terminals:
-        return ["没有任何终止（end）状态：这台机器不可能正常停机"]
+        return ["no end state (kind end): this machine can never halt normally"]
     can_stop, changed = set(terminals), True
     while changed:
         changed = False
@@ -74,7 +81,8 @@ def _termination(machine: Machine, reachable: set[str]) -> list[str]:
             if t.to in can_stop and src not in can_stop:
                 can_stop.add(src)
                 changed = True
-    return [f"状态 {sid} 走不到任何终止：进去就出不来，必然撞 max_steps"
+    return [f"state {sid} cannot reach any end state: once entered it never leaves and "
+            "will hit max_steps"
             for sid in sorted(reachable - can_stop)]
 
 
@@ -86,21 +94,23 @@ def _completeness(machine: Machine, reachable: set[str]) -> list[str]:
             continue
         edges = st.transitions
         if not edges:
-            out.append(f"状态 {sid} 没有任何出边：跑完就卡住了")
+            out.append(f"state {sid} has no outgoing transitions: it gets stuck once its "
+                       "action finishes")
         elif all(e.cond for e in edges):
-            out.append(f"状态 {sid} 的出边都带条件，没有兜底边：全部为假时会 stuck，"
-                       "而 stuck 与算错了在结果上分不出来")
+            out.append(f"state {sid} has only guarded transitions and no default edge: it gets "
+                       "stuck when all guards are false, and being stuck is indistinguishable "
+                       "from a wrong result")
     return out
 
 
 # --------------------------------------------------------------------------- #
-# 互斥完备（定理2）：有限格局枚举
+# Mutual exclusion and completeness (Theorem 2): finite configuration enumeration
 # --------------------------------------------------------------------------- #
-_ATOM_CAP = 24            # 单状态原子数上限，超了不枚举（防笛卡尔积爆炸）
+_ATOM_CAP = 24            # per-state atom cap; above it, no enumeration (avoids product blowup)
 
 
 def _judge_var_labels(machine: Machine) -> dict[str, list]:
-    """判断动作写入的变量 → 它的标签集（枚举域）。"""
+    """Variable written by a judge action → its label set (the enumeration domain)."""
     out: dict[str, list] = {}
     for st in machine.states.values():
         if st.action.kind == "judge":
@@ -118,11 +128,12 @@ def _determinism(machine: Machine, reachable: set[str]) -> list[str]:
             continue
         guarded = [e for e in st.transitions if e.cond]
         if len(guarded) < 2:
-            continue                          # 0/1 条条件边 + 兜底：天然互斥
+            continue                          # 0/1 guarded edge + default: exclusive by design
         atoms = [a for e in guarded for a in cond.atoms_of(e.cond)]
         if len(atoms) > _ATOM_CAP:
-            out.append(f"状态 {sid} 的条件原子过多（{len(atoms)}>{_ATOM_CAP}），"
-                       "无法枚举格局判互斥——把判断收进一个 judge 动作或接 FALLBACK")
+            out.append(f"state {sid} has too many guard atoms ({len(atoms)}>{_ATOM_CAP}), "
+                       "cannot enumerate configurations to check mutual exclusion; move the "
+                       "decision into a judge action or route to FALLBACK")
             continue
         allvars: set[str] = set()
         for e in guarded:
@@ -136,8 +147,10 @@ def _determinism(machine: Machine, reachable: set[str]) -> list[str]:
             else:
                 domains[v] = dom
         if undecidable:
-            out.append(f"状态 {sid} 的条件用到无法定域的变量 {undecidable}"
-                       "（变量对变量比较？），互斥完备判不了——改判断动作或收窄条件")
+            out.append(f"state {sid} uses variables without a finite domain in its guards "
+                       f"{undecidable} (variable-to-variable comparison?), so mutual exclusion "
+                       "and completeness cannot be decided; use a judge action or narrow the "
+                       "guards")
             continue
         names = list(domains)
         has_fallback = any(not e.cond for e in st.transitions)
@@ -151,19 +164,21 @@ def _determinism(machine: Machine, reachable: set[str]) -> list[str]:
                 except cond.CondError:
                     pass
             if len(fired) >= 2:
-                out.append(f"状态 {sid} 条件重叠：格局 {env} 下 {fired} 同时成立（违互斥）")
+                out.append(f"state {sid} has overlapping guards: under configuration {env}, "
+                           f"{fired} hold at the same time (violates mutual exclusion)")
                 break
             if len(fired) == 0 and not has_fallback:
-                out.append(f"状态 {sid} 条件有空隙：格局 {env} 下无边可走且无兜底（违完备）")
+                out.append(f"state {sid} has a gap in its guards: under configuration {env} no "
+                           "edge applies and there is no default edge (violates completeness)")
                 break
     return out
 
 
 def _domain(var: str, machine: Machine, judge_vars: dict, atoms: list) -> Optional[list]:
-    """给一个变量定有限枚举域。定不了返回 None。"""
+    """Give a variable a finite enumeration domain. Returns None if that is not possible."""
     va = [a for a in atoms if a.var == var]
     if any(a.op in ("empty", "nonempty") for a in va):
-        return [[], [1]]                      # 空 / 非空 的代表值
+        return [[], [1]]                      # representative values for empty / nonempty
     if var in judge_vars:
         return list(judge_vars[var])
     v = machine.var(var)
@@ -190,28 +205,29 @@ def _domain(var: str, machine: Machine, judge_vars: dict, atoms: list) -> Option
 
 # --------------------------------------------------------------------------- #
 def _loop_bounds(machine: Machine, reachable: set[str]) -> list[str]:
-    """回边（成环的边）必须带计数 inc、且有上限出口。"""
+    """A back edge (one that closes a cycle) must carry a counter inc and have a bound exit."""
     out: list[str] = []
     back_edges = _back_edges(machine, reachable)
     for src, e in back_edges:
         if not e.inc:
-            out.append(f"回边 {src}→{e.to} 没有计数变量（inc），可能不停机")
+            out.append(f"back edge {src}→{e.to} has no counter (inc), may never halt")
             continue
         cnt = e.inc
         target = machine.states.get(e.to)
         exits = [g for g in (target.transitions if target else [])
                  if g.cond and cnt in cond.vars_of(g.cond)]
         if not exits:
-            out.append(f"回边 {src}→{e.to} 的计数变量 {cnt} 没有上限出口"
-                       f"（{e.to} 没有一条条件读它来跳出）")
+            out.append(f"back edge {src}→{e.to}: counter {cnt} has no bound exit"
+                       f" (no guard on {e.to} reads it to break out)")
     return out
 
 
 def _write_before_read(machine: Machine, reachable: set[str]) -> list[str]:
-    """状态要读的变量（action.reads + 出边条件的变量），在到它的每条路径上都已被写。
+    """Variables a state reads (action.reads + outgoing guard variables) are written on every path.
 
-    按路径**取交集**（不是并集）：并集问「有没有一条路让它存在」，交集问「是不是每条路都
-    让它存在」。只有后者能保证不在某条偶发路径上撞未定义变量。
+    Paths are combined by **intersection** (not union): union asks "is there some path on which
+    it exists", intersection asks "does it exist on every path". Only the latter guarantees we
+    never hit an undefined variable on some occasional path.
     """
     seed = {v.name for v in machine.variables
             if v.init is not None or v.init_from is not None}
@@ -242,16 +258,16 @@ def _write_before_read(machine: Machine, reachable: set[str]) -> list[str]:
     out: list[str] = []
     for sid in sorted(reachable):
         st = machine.states[sid]
-        in_avail = avail[sid]                        # 进入状态时可用（动作执行前）
-        after = in_avail | _writes_of(st)            # 动作执行后（出边条件在此时求值）
+        in_avail = avail[sid]                        # available on entry (before the action runs)
+        after = in_avail | _writes_of(st)            # after the action runs (guards evaluated here)
         missing = [k for k in sorted(_reads_of(st)) if k not in in_avail]
         cond_need: set[str] = set()
         for e in st.transitions:
             cond_need |= cond.vars_of(e.cond)
         missing += [k for k in sorted(cond_need) if k not in after and k not in missing]
         if missing:
-            out.append(f"状态 {sid} 要读 {sorted(set(missing))}，但走到它时这些变量还没被写过"
-                       "（上游没有一条路径把它们都写上）")
+            out.append(f"state {sid} reads {sorted(set(missing))}, but these variables have not "
+                       "been written when it is reached (no upstream path writes all of them)")
     return out
 
 
@@ -263,7 +279,8 @@ def _output_completeness(machine: Machine, reachable: set[str]) -> list[str]:
     universe = set(seed)
     for s in machine.states.values():
         universe |= _writes_of(s)
-    # 简化：终止态到达时，其 output 键应在 universe 里（更严的按路径交集见先写后读）
+    # simplification: when an end state is reached, its output keys should be in universe
+    # (the stricter per-path intersection is what write-before-read does)
     for sid in sorted(reachable):
         st = machine.states[sid]
         if st.action.kind != "end":
@@ -271,17 +288,18 @@ def _output_completeness(machine: Machine, reachable: set[str]) -> list[str]:
         keys = term_out.get(st.action.terminal, [])
         missing = [k for k in keys if k not in universe]
         if missing:
-            out.append(f"终止态 {sid} 声明输出 {missing}，但没有状态产出它们")
+            out.append(f"end state {sid} declares outputs {missing}, but no state produces them")
     return out
 
 
 # --------------------------------------------------------------------------- #
-#: 入参模板里的占位符：``{"command": "${cmd}"}`` 里的 ``cmd``。
+#: Placeholders in an input template: the ``cmd`` in ``{"command": "${cmd}"}``.
 _TEMPLATE_RE = re.compile(r"\$\{(\w+)\}")
 
 
 def template_vars(action) -> list[str]:
-    """工具入参模板引用的变量。``{"path": "${p}"}`` ⇒ ``["p"]``；嵌套的 list/dict 也扫。"""
+    """Variables referenced by a tool input template. ``{"path": "${p}"}`` ⇒ ``["p"]``; nested
+    lists/dicts are scanned too."""
     out: list[str] = []
 
     def walk(v) -> None:
@@ -299,11 +317,14 @@ def template_vars(action) -> list[str]:
 
 
 def _reads_of(state) -> list[str]:
-    """这个状态要读的变量 = 声明的 ``reads`` + **入参模板引用的变量**。
+    """Variables this state reads = declared ``reads`` + **input template variables**.
 
-    模板变量原来不算读，于是「``${apply_cmd}`` 谁都没写过」这种洞能安静地通过全部结构检查
-    ——机器真跑时那一格渲染成空，工具拿到空入参。实测过：文档骨架里产这个变量的模型步被
-    裁掉之后，剩下的工具状态照样引用它，复述还全绿。模板是读，必须按先写后读查。
+    Template variables used not to count as reads, so a hole like "nobody ever writes
+    ``${apply_cmd}``" could quietly pass every structural check: when the machine actually ran,
+    that slot rendered empty and the tool received an empty input. This was observed in practice:
+    after the model step that produced the variable was cut from the document skeleton, the
+    remaining tool state still referenced it, and replay was still all green. A template is a
+    read and must be checked by write-before-read.
     """
     reads = list(getattr(state.action, "reads", []) or [])
     return list(dict.fromkeys(reads + template_vars(state.action)))
@@ -314,7 +335,8 @@ def _writes_of(state) -> set[str]:
 
 
 def _back_edges(machine: Machine, reachable: set[str]):
-    """回边 = 指向当前 DFS 递归栈上祖先（含自身）的边。标准三色 DFS，从 initial 出发。"""
+    """Back edge = an edge to an ancestor (or itself) on the current DFS stack. Standard
+    three-color DFS starting from initial."""
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {s: WHITE for s in machine.states}
     out: list = []
@@ -324,7 +346,7 @@ def _back_edges(machine: Machine, reachable: set[str]):
         for t in machine.out_edges(u):
             c = color.get(t.to, WHITE)
             if c == GRAY:
-                out.append((u, t))              # 指向栈上祖先 → 回边
+                out.append((u, t))              # points to an ancestor on the stack → back edge
             elif c == WHITE:
                 dfs(t.to)
         color[u] = BLACK

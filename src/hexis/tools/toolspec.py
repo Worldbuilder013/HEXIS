@@ -1,15 +1,17 @@
-"""工具定义：编译器与执行后端共用的接口描述。
+"""Tool definitions: the interface description shared by the compiler and the execution backends.
 
-编译器把工具名当作不透明标识，只通过 :class:`ToolSpec` 了解一个工具：参数字段、产出字段、
-成功判据、主要输出。定义有三个来源，按可信度记在 ``source`` 上：
+The compiler treats tool names as opaque identifiers and learns about a tool only through :class:`ToolSpec`:
+parameter fields, output fields, success criterion and primary output. Definitions come from three sources,
+recorded in ``source`` by trustworthiness:
 
-* ``registry``  显式提供的工具注册表（JSON 文件），是接口保证；
-* ``backend``   执行后端 ``describe_tools()`` 报出来的；
-* ``inferred``  只从轨迹里观察到的：说明「出现过什么」，不是接口保证。
+* ``registry``  an explicitly provided tool registry (JSON file); an interface guarantee;
+* ``backend``   reported by an execution backend's ``describe_tools()``;
+* ``inferred``  only observed in traces: it says "what has appeared", not an interface guarantee.
 
-推断规则只有一条**状态字段惯例**（:data:`STATUS_CONVENTIONS`）：产出里有 ``returncode`` 就按
-``returncode == 0`` 判成功，有 ``ok`` 就按 ``ok == True``；两者都没有就不判。这是关于字段名的
-惯例，写在这里而不是编译器里，编译器只读 ``success`` 表达式。
+There is only one inference rule, the **status field convention** (:data:`STATUS_CONVENTIONS`): if the output has
+``returncode``, success is ``returncode == 0``; if it has ``ok``, success is ``ok == True``; if it has neither,
+success is not judged. This is a convention about field names, kept here rather than in the compiler; the
+compiler only reads the ``success`` expression.
 """
 from __future__ import annotations
 
@@ -20,12 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
-#: 状态字段惯例：(字段名, 成功判据, 成功取值, 失败取值)。顺序即优先级。
+#: status field conventions: (field name, success criterion, success value, failure value). Order is priority.
 STATUS_CONVENTIONS: tuple[tuple[str, str, Any, Any], ...] = (
     ("returncode", "returncode == 0", 0, 1),
     ("ok", "ok == True", True, False),
 )
-#: 这些字段描述调用状态而非内容，不作语义变量、不作判断状态的读取对象。
+#: these fields describe the call status rather than content; they are not semantic variables and not read by judge states.
 STATUS_KEYS = frozenset({"ok", "returncode", "stderr", "error", "error_text", "exists",
                          "metadata", "opencode_part"})
 
@@ -34,18 +36,18 @@ STATUS_KEYS = frozenset({"ok", "returncode", "stderr", "error", "error_text", "e
 class ToolSpec:
     name: str
     description: str = ""
-    input_schema: dict = field(default_factory=dict)      # 字段 → {type, required?, constant?}
-    output_schema: dict = field(default_factory=dict)     # 字段 → type
-    success: str = ""                                     # 产出字段上的成功判据（条件表达式）
-    primary: Optional[str] = None                         # 主要输出字段
+    input_schema: dict = field(default_factory=dict)      # field -> {type, required?, constant?}
+    output_schema: dict = field(default_factory=dict)     # field -> type
+    success: str = ""                                     # success criterion over output fields (guard expression)
+    primary: Optional[str] = None                         # primary output field
     status_keys: list = field(default_factory=lambda: sorted(STATUS_KEYS))
-    label: str = ""                                       # 注册表给定的固定阶段标签（可空）
+    label: str = ""                                       # fixed phase label given by the registry (may be empty)
     source: str = "inferred"
     observed_inputs: Counter = field(default_factory=Counter)
     observed_outputs: Counter = field(default_factory=Counter)
     calls: int = 0
 
-    # ---- 派生 ---- #
+    # ---- derived ---- #
     def input_keys(self) -> list[str]:
         keys = list(self.input_schema) + [k for k in self.observed_inputs if k not in self.input_schema]
         return list(dict.fromkeys(keys))
@@ -55,7 +57,7 @@ class ToolSpec:
         return list(dict.fromkeys(keys))
 
     def sure_outputs(self) -> frozenset:
-        """保证出现的产出字段：注册表声明的全部字段；推断时取每次调用都出现的字段。"""
+        """Output fields guaranteed to appear: all fields declared by the registry; when inferred, the fields present in every call."""
         if self.source in ("registry", "backend") and self.output_schema:
             return frozenset(self.output_schema)
         if self.calls:
@@ -67,7 +69,7 @@ class ToolSpec:
                          if isinstance(v, Mapping) and v.get("constant"))
 
     def status_values(self, ok: Optional[bool]) -> dict:
-        """调用成败已知时，成功判据里各字段的取值（三值护卫判定用）。未知返回空。"""
+        """When the call's success is known, the value of each field in the success criterion (for three-valued guard evaluation). Empty when unknown."""
         if ok is None or not self.success:
             return {}
         out: dict = {}
@@ -115,7 +117,7 @@ def infer_success(output_keys: Iterable[str]) -> str:
 
 
 def infer_primary(observed_outputs: Mapping[str, int]) -> Optional[str]:
-    """主要输出：出现最多的非状态字段。"""
+    """Primary output: the most frequent non-status field."""
     cands = [(n, k) for k, n in observed_outputs.items() if k not in STATUS_KEYS]
     if not cands:
         return None
@@ -124,7 +126,7 @@ def infer_primary(observed_outputs: Mapping[str, int]) -> Optional[str]:
 
 
 def observe(spec: ToolSpec, inp: Mapping, out: Mapping) -> None:
-    """把一次调用记进定义的观察计数；推断来源的定义据此补成功判据与主要输出。"""
+    """Record one call in the definition's observation counts; inferred definitions fill in the success criterion and primary output from them."""
     spec.calls += 1
     for k in (inp or {}):
         spec.observed_inputs[str(k)] += 1
@@ -136,12 +138,20 @@ def observe(spec: ToolSpec, inp: Mapping, out: Mapping) -> None:
         spec.primary = infer_primary(spec.observed_outputs)
 
 
+def registry_dict(registry: Mapping[str, ToolSpec]) -> dict:
+    """A registry as JSON-ready data that :func:`load_registry` reads back unchanged."""
+    return {"tools": {name: {"description": s.description, "input_schema": dict(s.input_schema),
+                             "output_schema": dict(s.output_schema), "success": s.success, "primary": s.primary,
+                             "status_keys": list(s.status_keys), "label": s.label}
+                      for name, s in registry.items()}}
+
+
 def load_registry(path: Any) -> dict[str, ToolSpec]:
-    """读工具注册表 JSON：``{"tools": {name: {...}}}`` 或 ``{name: {...}}``。"""
+    """Read a tool registry JSON: ``{"tools": {name: {...}}}`` or ``{name: {...}}``."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     tools = data.get("tools", data) if isinstance(data, dict) else {}
     return {name: ToolSpec.from_dict(name, d) for name, d in tools.items()}
 
 
 __all__ = ["STATUS_CONVENTIONS", "STATUS_KEYS", "ToolSpec", "infer_primary", "infer_success",
-           "load_registry", "observe"]
+           "load_registry", "observe", "registry_dict"]

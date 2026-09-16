@@ -1,7 +1,7 @@
-"""⑬ context_probe：对含模型调用的状态输出窄读/宽读的产出质量对比报告。"""
+"""context_probe: for states with model calls, report a comparison of output quality under narrow vs. wide reads."""
 
-from hexis.legacy import compiler, report
 from hexis.examples import table_clean as tc
+from hexis.legacy import compiler, report
 
 
 def test_context_probe_compares_narrow_and_wide_context(accepted):
@@ -19,10 +19,10 @@ def test_context_probe_compares_narrow_and_wide_context(accepted):
     assert judge_ids
     for sid in judge_ids:
         d = probe[sid]
-        assert d["samples"] > 0                        # 真在任务流里采到了判断输入
-        assert d["narrow_vs_wide_agree"] is not None   # 两种上下文的对比在报告里
+        assert d["samples"] > 0                        # judge inputs were really sampled from the task stream
+        assert d["narrow_vs_wide_agree"] is not None   # the comparison of the two contexts is in the report
         assert 0.0 <= d["narrow_vs_wide_agree"] <= 1.0
-        assert d["label_dist"]                         # 产出分布也在
+        assert d["label_dist"]                         # the output distribution is there too
 
 
 def test_cover_report_renders(accepted):
@@ -32,4 +32,4 @@ def test_cover_report_renders(accepted):
     rep = report.cover_report(cr.machine, compiler.partition(tc.skill_doc()),
                               t_plus=traces)
     text = report.render(rep)
-    assert "覆盖报告" in text and "S2.1" in text
+    assert "coverage report" in text and "S2.1" in text

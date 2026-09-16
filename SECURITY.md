@@ -2,7 +2,7 @@
 
 ## Execution model
 
-skill2fsm runs agents. `skill2fsm run`, `skill2fsm bench` and `skill2fsm collect` execute tool calls whose
+hexis runs agents. `hexis-agent run`, `hexis-agent bench` and `hexis-agent collect` execute tool calls whose
 arguments are produced by a language model, including arbitrary shell commands (`bash`) and file writes.
 Treat machines, skills and task files as code.
 
@@ -13,11 +13,15 @@ Treat machines, skills and task files as code.
   tools with the permissions of the current user.
 - Tool calls can read and write files outside the job directory and reach the network unless the
   environment prevents it.
-- Guards in machine files are evaluated by a whitelisted expression evaluator (`skill2fsm.cond`, no
+- Guards in machine files are evaluated by a whitelisted expression evaluator (`hexis.machine.cond`, no
   `eval`), but tool arguments rendered from a machine are executed as given. Only run machines and task
   files from sources you trust.
 - Model endpoints are configured through environment variables or a `.env` file; keep `.env` out of
-  version control (it is listed in `.gitignore`).
+  version control (it is listed in `.gitignore`). Keys are read from the environment only (`--api-key-env`
+  names the variable) and are never written to build directories or logs.
+- `hexis-agent update` sends trace steps (tool arguments and shortened results) and the skill's clauses to the
+  configured model endpoint. Build directories keep copies of the traces and of every question sent, and
+  `PROMPT.md` contains the whole machine; review them before sharing.
 
 ## Reporting a vulnerability
 

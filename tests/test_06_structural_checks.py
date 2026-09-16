@@ -1,7 +1,7 @@
-"""⑥ 结构检查：条件互斥完备、修复环带上限、变量先写后读，坏机器逐条报出。"""
+"""⑥ Structural checks: guards are mutually exclusive and complete, repair loops are bounded, variables are written before read, and broken machines are reported one by one."""
 
-from hexis.machine import checks
 from hexis.examples import table_clean as tc
+from hexis.machine import checks
 from hexis.machine.schema import EndAction, State, Transition, empty_machine
 
 
@@ -14,22 +14,22 @@ def test_missing_fallback_edge_is_flagged():
     m = tc.reference_machine()
     m.states["s2"].transitions = [t for t in m.states["s2"].transitions if t.cond]
     f = checks.structural_findings(m)
-    assert any("兜底" in x or "空隙" in x for x in f)
+    assert any("default edge" in x or "gap" in x for x in f)
 
 
 def test_overlapping_conditions_are_flagged():
     m = tc.reference_machine()
     m.states["s2"].transitions = [
-        Transition(**{"if": "header_ok == '规范'", "to": "s4"}),
-        Transition(**{"if": "header_ok == '规范'", "to": "s3"}),  # 与上条重叠
+        Transition(**{"if": "header_ok == 'well_formed'", "to": "s4"}),
+        Transition(**{"if": "header_ok == 'well_formed'", "to": "s3"}),  # overlaps the previous one
         Transition(to="FALLBACK"),
     ]
-    assert any("重叠" in x for x in checks.structural_findings(m))
+    assert any("overlapping" in x for x in checks.structural_findings(m))
 
 
 def test_uncounted_loop_is_flagged():
     m = tc.reference_machine()
-    m.states["s3"].transitions = [Transition(to="s2")]           # 回边丢了 inc
+    m.states["s3"].transitions = [Transition(to="s2")]           # back edge lost its inc
     assert any("inc" in x for x in checks.structural_findings(m))
 
 
@@ -42,11 +42,11 @@ def test_read_before_write_is_flagged():
 def test_unreachable_state_is_flagged():
     m = tc.reference_machine()
     m.states["orphan"] = State(id="orphan", action=EndAction(terminal="done"))
-    assert any("走不到" in x for x in checks.structural_findings(m))
+    assert any("unreachable" in x for x in checks.structural_findings(m))
 
 
 def test_mutual_exclusion_holds_on_reference_judge():
-    """参考机器 s2 的三条出边在所有 (header_ok, fix_count) 格局下至多一条成立。"""
+    """On the reference machine, at most one of s2's three outgoing edges holds under every (header_ok, fix_count) configuration."""
     m = tc.reference_machine()
-    det = [x for x in checks.structural_findings(m) if "重叠" in x or "空隙" in x]
+    det = [x for x in checks.structural_findings(m) if "overlapping" in x or "gap" in x]
     assert det == []

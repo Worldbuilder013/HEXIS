@@ -7,13 +7,10 @@ API reference: https://opencode.ai/docs/server/
 """
 from __future__ import annotations
 
-from copy import deepcopy
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
-from pathlib import Path
-import shutil
 import secrets
+import shutil
 import signal
 import socket
 import subprocess
@@ -21,13 +18,16 @@ import tempfile
 import threading
 import time
 import uuid
+from copy import deepcopy
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import httpx
 
 from hexis.tools.backends import registry as _registry
 from hexis.tools.toolspec import ToolSpec
 
-#: 本后端能执行的原生工具：来自注册表 backends/opencode.json。
+#: native tools this backend can execute: taken from the registry backends/opencode.json.
 REGISTRY = _registry("opencode")
 PRIMITIVES = tuple(REGISTRY)
 
@@ -194,7 +194,7 @@ class OpenCodeTools:
         return r.json()
 
     def describe_tools(self) -> dict[str, ToolSpec]:
-        """执行后端接口：这台 OpenCode 实际提供的原生工具定义（注册表 ∩ 安装的工具）。"""
+        """Execution backend interface: the native tool definitions this OpenCode instance actually provides (the registry intersected with the installed tools)."""
         avail = getattr(self, "available_tools", None)
         return {n: s for n, s in REGISTRY.items() if avail is None or n in avail}
 

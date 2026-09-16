@@ -2,19 +2,20 @@
 # The value normalization, cell comparison and range helpers and the LibreOffice recalculation command
 # are adapted from SpreadsheetBench (https://github.com/RUCKBReasoning/SpreadsheetBench, CC BY-SA 4.0);
 # see THIRD_PARTY_NOTICES.md.
-"""SpreadsheetBench 的金标准判定。
+"""Golden-workbook grading for SpreadsheetBench.
 
-判定是：把智能体保存下来的工作簿与金标准工作簿，在该任务声明的 ``answer_position``
-区域内**逐格比对取值**。写错一格就是不通过。
+The check: compare the workbook saved by the agent with the golden workbook **value by value, cell by cell** within
+the ``answer_position`` range declared by the task. One wrong cell means failure.
 
-比对逻辑逐字取自 SpreadsheetBench 官方的 ``evaluation.py``（见
-``third_party/SpreadsheetBench/evaluation.py``），包括它那套类型归一：数值四舍五入到两位、
-日期折算成 Excel 序列号、``""`` 与 ``None`` 视为相同。不自己另写一套——口径一旦漂移，
-报出来的数就不再是 SpreadsheetBench 的那个数。
+The comparison logic is taken verbatim from SpreadsheetBench's official ``evaluation.py`` (see
+``third_party/SpreadsheetBench/evaluation.py``), including its type normalization: numbers rounded to two decimals,
+dates converted to Excel serial numbers, ``""`` and ``None`` treated as equal. We do not write our own version: once
+the criteria drift, the reported number is no longer SpreadsheetBench's number.
 
-**通过率不能拿绝对值当闸门。** SpreadsheetBench 上最好的模型也只有五成上下，对编译产物
-要求 90% 的绝对通过率是不可能达到的。所以闸门问的是**相对**问题：同一个智能体、同一个模型、同一个验证器下，编译产物通过的任务集合能不能
-跟上原技能。见 :func:`relative_success`。
+**The success rate cannot be gated on its absolute value.** Even the best models on SpreadsheetBench only reach about
+half, so requiring a 90% absolute success rate from a compiled artifact is unattainable. The gate therefore asks a
+**relative** question: with the same agent, the same model and the same verifier, does the set of tasks the compiled
+artifact passes keep up with the original skill? See :func:`relative_success`.
 """
 
 from __future__ import annotations
@@ -26,16 +27,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-#: 官方数据集的位置。只读，不进 git（见 .gitignore）。
+#: Location of the official dataset. Read-only, not committed to git (see .gitignore).
 BENCH_ROOT = Path("third_party/SpreadsheetBench/spreadsheetbench_verified_400")
 
 
 class GoldenUnavailable(RuntimeError):
-    """拿不到金标准数据。**不降级**——降级判出来的数不再是 SpreadsheetBench 的口径。"""
+    """The golden data is not available. **No degraded mode**: degraded grading would not follow SpreadsheetBench's criteria."""
 
 
 # --------------------------------------------------------------------------- #
-# 取值比对：逐字取自 SpreadsheetBench 的 evaluation.py（CC BY-SA 4.0，见 THIRD_PARTY_NOTICES.md）
+# Value comparison: taken verbatim from SpreadsheetBench's evaluation.py (CC BY-SA 4.0, see THIRD_PARTY_NOTICES.md)
 # --------------------------------------------------------------------------- #
 def _datetime_to_float(dt: datetime.datetime) -> float:
     excel_start_date = datetime.datetime(1899, 12, 30)
@@ -59,7 +60,7 @@ def _transform_value(v: Any) -> Any:
 
 
 def compare_cell_value(v1: Any, v2: Any) -> bool:
-    """两个单元格取值是否相同。空串与 ``None`` 视为相同，这是官方的判法。"""
+    """Whether two cell values are the same. An empty string and ``None`` count as equal; that is the official rule."""
     v1, v2 = _transform_value(v1), _transform_value(v2)
     if (v1 == "" and v2 is None) or (v1 is None and v2 == ""):
         return True
@@ -95,7 +96,7 @@ def _parse_cell_range(range_str: str) -> tuple[tuple[int, int], tuple[int, int]]
 
 
 def cell_names(range_str: str) -> list[str]:
-    """``'G2:G16'`` → ``['G2', ..., 'G16']``。单格直接返回它自己。"""
+    """``'G2:G16'`` → ``['G2', ..., 'G16']``. A single cell is returned as itself."""
     if ":" not in range_str:
         return [range_str]
     (sc, sr), (ec, er) = _parse_cell_range(range_str)
@@ -104,10 +105,10 @@ def cell_names(range_str: str) -> list[str]:
 
 
 # --------------------------------------------------------------------------- #
-# 重算：openpyxl 不算公式，不重算就只能读到 None
+# Recalculation: openpyxl does not compute formulas, so without recalculation only None can be read
 # --------------------------------------------------------------------------- #
-#: LibreOffice 的可执行文件。SpreadsheetBench 官方评测的前置依赖，
-#: ``brew install --cask libreoffice`` / ``apt install libreoffice-calc``。
+#: LibreOffice executables. A prerequisite of SpreadsheetBench's official evaluation:
+#: ``brew install --cask libreoffice`` / ``apt install libreoffice-calc``.
 _SOFFICE_CANDIDATES = (
     "libreoffice", "soffice",
     "/Applications/LibreOffice.app/Contents/MacOS/soffice",
@@ -128,19 +129,20 @@ def find_soffice() -> Optional[str]:
 
 
 def recalculate(path: Path, *, timeout_s: float = 180.0) -> tuple[bool, str]:
-    """用 LibreOffice 无头打开再存回，把公式的计算结果落成缓存值。
+    """Open the file headless in LibreOffice and save it back, so that formula results are stored as cached values.
 
-    **这一步不是可选的。** openpyxl 只写公式串、从不计算，``data_only=True`` 读回来就是
-    ``None``。少了它，一份完全正确的答案会被判成失败——实测基线臂上 ``sb_49801`` 写出
-    ``=LEFT(A1,2)&RIGHT(A1,5)``（正确），判定却报「金标准 'SL-0035'，产出 None」，八条任务
-    的通过率因此从真实水平掉到 2/8。失败的形状是清一色的「产出 None」而不是「算错了」，
-    那正是这个 bug 的指纹：``None`` 不是一个错误答案，是**没有值**。
+    **This step is not optional.** openpyxl only writes formula strings and never computes them; reading back with
+    ``data_only=True`` gives ``None``. Without this step a completely correct answer is graded as a failure: in a
+    measured baseline-arm run, ``sb_49801`` wrote ``=LEFT(A1,2)&RIGHT(A1,5)`` (correct), yet grading reported
+    "golden 'SL-0035', got None", and the success rate over eight tasks dropped from its real level to 2/8. The
+    failures all had the shape "got None" rather than "computed wrong", which is exactly this bug's fingerprint:
+    ``None`` is not a wrong answer, it is **no value at all**.
 
-    做法与调用参数逐字取自官方的 ``evaluation/open_spreadsheet.py``
-    （``--headless --calc --convert-to xlsx:Calc MS Excel 2007 XML``），不自己另发明一套。
+    The procedure and the invocation arguments are taken verbatim from the official ``evaluation/open_spreadsheet.py``
+    (``--headless --calc --convert-to xlsx:Calc MS Excel 2007 XML``); we do not invent our own.
 
-    返回 ``(成功与否, 原因)``。**失败不静默**：调用方必须把它变成一条明说的判定失败，
-    而不是退回去比未重算的值——那等于把这个 bug 重新引入一次。
+    Returns ``(success, reason)``. **Failure is never silent**: the caller must turn it into an explicit grading
+    failure instead of falling back to comparing unrecalculated values, which would reintroduce this very bug.
     """
     import shutil as _sh
     import subprocess
@@ -148,13 +150,13 @@ def recalculate(path: Path, *, timeout_s: float = 180.0) -> tuple[bool, str]:
 
     soffice = find_soffice()
     if soffice is None:
-        return False, ("找不到 LibreOffice，无法重算公式。"
-                       "装它：brew install --cask libreoffice（macOS）/ "
-                       "apt install libreoffice-calc（Linux）。"
-                       "不重算的话写公式的答案一律被读成 None，判定会系统性偏低。")
+        return False, ("LibreOffice not found, cannot recalculate formulas; "
+                       "install it with brew install --cask libreoffice (macOS) / "
+                       "apt install libreoffice-calc (Linux). "
+                       "Without recalculation every formula answer is read as None and grading is systematically too low")
     path = Path(path).resolve()
     if not path.is_file():
-        return False, f"文件不存在：{path}"
+        return False, f"file does not exist: {path}"
     with _tf.TemporaryDirectory() as tmp:
         try:
             proc = subprocess.run(
@@ -163,36 +165,36 @@ def recalculate(path: Path, *, timeout_s: float = 180.0) -> tuple[bool, str]:
                  "--outdir", tmp, str(path)],
                 capture_output=True, text=True, timeout=timeout_s)
         except subprocess.TimeoutExpired:
-            return False, f"重算超时（{timeout_s:.0f}s）"
+            return False, f"recalculation timed out ({timeout_s:.0f}s)"
         out = Path(tmp) / (path.stem + ".xlsx")
         if proc.returncode != 0 or not out.is_file():
-            return False, f"LibreOffice 退出码 {proc.returncode}：{(proc.stderr or '')[-200:]}"
+            return False, f"LibreOffice exit code {proc.returncode}: {(proc.stderr or '')[-200:]}"
         _sh.move(str(out), str(path.with_suffix(".xlsx")))
     return True, ""
 
 
 def compare_workbooks(golden: Path, produced: Path, answer_position: str,
                       *, recalc: bool = True) -> tuple[bool, str]:
-    """在 ``answer_position`` 区域内逐格比对取值。
+    """Compare values cell by cell within the ``answer_position`` range.
 
-    ``answer_position`` 形如 ``G2:G16`` 或 ``'Sheet2'!A1:B9``，逗号分隔多段，全部命中才算过。
-    ``data_only=True`` 读的是**缓存值**而不是公式串：任务问的是结果对不对，用什么公式算出来
-    的不在判定范围内。
+    ``answer_position`` looks like ``G2:G16`` or ``'Sheet2'!A1:B9``, with several comma-separated pieces; all of them
+    must match to pass. ``data_only=True`` reads **cached values**, not formula strings: the task asks whether the
+    result is right, and which formula computed it is outside the scope of grading.
     """
     import openpyxl
 
     if not Path(produced).is_file():
-        return False, "没有产出工作簿"
+        return False, "no workbook produced"
     if recalc:
         ok, why = recalculate(Path(produced))
         if not ok:
-            # 重算不了就判不通过并**说明白原因**，不退回去比未重算的值。
-            return False, f"无法重算公式：{why}"
+            # recalculation impossible: fail and **state the reason**; never compare unrecalculated values instead.
+            return False, f"cannot recalculate formulas: {why}"
         produced = Path(produced).with_suffix(".xlsx")
     try:
         wb_gt = openpyxl.load_workbook(filename=str(golden), data_only=True)
         wb_pr = openpyxl.load_workbook(filename=str(produced), data_only=True)
-    except Exception as exc:  # noqa: BLE001 — 打不开就是没通过，不该炸掉整批
+    except Exception as exc:  # noqa: BLE001 — a workbook that will not open fails; it must not crash the batch
         return False, f"{type(exc).__name__}: {exc}"
 
     for piece in answer_position.split(","):
@@ -204,21 +206,21 @@ def compare_workbooks(golden: Path, produced: Path, answer_position: str,
         sheet_name = sheet_name.strip().strip("'")
         cell_range = cell_range.strip().strip("'")
         if sheet_name not in wb_pr.sheetnames:
-            return False, f"产出里没有工作表 {sheet_name!r}"
+            return False, f"no worksheet {sheet_name!r} in the output"
         ws_gt, ws_pr = wb_gt[sheet_name], wb_pr[sheet_name]
         for name in cell_names(cell_range):
             a, b = ws_gt[name].value, ws_pr[name].value
             if not compare_cell_value(a, b):
-                return False, f"{sheet_name}!{name} 金标准 {a!r}，产出 {b!r}"
+                return False, f"{sheet_name}!{name} golden {a!r}, got {b!r}"
     return True, ""
 
 
 # --------------------------------------------------------------------------- #
-# 数据集
+# Dataset
 # --------------------------------------------------------------------------- #
 @dataclass
 class GoldenTask:
-    """一条 SpreadsheetBench 任务：指令、初始工作簿、金标准、判定区域。"""
+    """One SpreadsheetBench task: instruction, initial workbook, golden workbook, grading range."""
 
     id: str
     instruction: str
@@ -232,19 +234,21 @@ class GoldenTask:
 
 
 def load_dataset(root: Path = BENCH_ROOT) -> dict[str, GoldenTask]:
-    """按任务号索引整个 verified-400。
+    """Index the whole verified-400 set by task id.
 
-    每个任务目录里有三份测试用例（``1_``/``2_``/``3_`` 前缀），官方评测三份都要过。这里
-    只取第一份：闭环要跑的是编译产物在**同一条任务**上跟不跟得上原技能，三份用例是同一
-    条指令的三份数据，多跑两份只是把 token 乘三，判别力不增加。这一点在报出的数里要写明。
+    Each task directory holds three test cases (prefixes ``1_``/``2_``/``3_``), and the official evaluation requires
+    all three to pass. Only the first is taken here: the closed loop checks whether the compiled artifact keeps up with
+    the original skill on **the same task**, and the three cases are three data sets for the same instruction; running
+    the other two only triples the tokens without adding discriminating power. This must be stated wherever the numbers
+    are reported.
     """
     root = Path(root)
     meta = root / "dataset.json"
     if not meta.is_file():
         raise GoldenUnavailable(
-            f"找不到 {meta}。SpreadsheetBench 的数据不随仓库分发，"
-            "从 https://github.com/RUCKBReasoning/SpreadsheetBench 取 "
-            "data/spreadsheetbench_verified_400.tar.gz 解压到 third_party/SpreadsheetBench/。")
+            f"{meta} not found; SpreadsheetBench data is not distributed with the repository: "
+            "get data/spreadsheetbench_verified_400.tar.gz from https://github.com/RUCKBReasoning/SpreadsheetBench "
+            "and extract it into third_party/SpreadsheetBench/")
     out: dict[str, GoldenTask] = {}
     for row in json.loads(meta.read_text("utf-8")):
         tid = str(row["id"])
@@ -258,16 +262,16 @@ def load_dataset(root: Path = BENCH_ROOT) -> dict[str, GoldenTask]:
             instruction_type=row.get("instruction_type", ""),
             init=init, golden=golden)
     if not out:
-        raise GoldenUnavailable(f"{root} 里一条完整任务都没有")
+        raise GoldenUnavailable(f"{root} contains no complete task")
     return out
 
 
 # --------------------------------------------------------------------------- #
-# 相对通过率
+# Relative success rate
 # --------------------------------------------------------------------------- #
 @dataclass
 class SuccessReport:
-    """一次判定的结果，逐条留痕。"""
+    """The result of one grading run, with a record kept for every task."""
 
     per_task: dict[str, dict] = field(default_factory=dict)
     oracle_passed: list[str] = field(default_factory=list)
@@ -300,14 +304,16 @@ class SuccessReport:
 
 
 def relative_success(report: SuccessReport) -> Optional[float]:
-    """编译产物在**原技能做得成的那些任务**上的通过比例。
+    """The share of **the tasks the original skill can do** that the compiled artifact passes.
 
-    分母是原技能通过的任务数，不是全部任务数。原技能本来就做不成的任务，编译产物做不成
-    不能算工具化的账——那是这条基准本身的难度，SpreadsheetBench 上最好的模型也只有五成
-    上下。闸门要问的是「搬进代码之后，原本干得成的还干不干得成」。
+    The denominator is the number of tasks the original skill passed, not the total number of tasks. When the compiled
+    artifact fails a task the original skill could not do either, that must not be charged to compilation: it is the
+    difficulty of the benchmark itself, and even the best models on SpreadsheetBench only reach about half. The gate
+    asks "after moving into code, does what used to work still work?".
 
-    原技能一条都没通过时返回 ``None``（测不出），而不是 1.0。「没有回归」和「根本没测出
-    东西」在数字上必须分得开——上一版正是在这种地方把跑失败读成了防护完美。
+    Returns ``None`` (not measurable) rather than 1.0 when the original skill passed no task at all. "No regression"
+    and "nothing was measured" must be distinguishable in the numbers; an earlier version misread failed runs as
+    perfect protection in exactly this kind of spot.
     """
     if not report.oracle_passed:
         return None
@@ -316,16 +322,16 @@ def relative_success(report: SuccessReport) -> Optional[float]:
 
 
 def find_produced(root: Path, *, expected: str = "", shipped: Iterable[Path] = ()) -> Optional[Path]:
-    """从导出的产物里挑出智能体保存的那个工作簿。
+    """Pick the workbook the agent saved out of the exported artifacts.
 
-    **按名字挑，不按时间挑。** 第一版按「最后修改的 .xlsx」挑，当场挑错：技能的
-    ``assets/`` 里躺着全部八条任务的初始工作簿，沙箱开局把整个技能目录复制一遍，八份的
-    mtime 因此都是新的，「最后修改」在它们之间基本等于随机。实测 sb_53449 就挑中了别的
-    任务那份没动过的初始文件，判定报出 ``G4 金标准 None，产出 'd'``——那不是智能体做错了，
-    是判定拿错了文件比。
+    **Pick by name, not by time.** The first version picked "the most recently modified .xlsx" and got it wrong
+    right away: the skill's ``assets/`` held the initial workbooks of all eight tasks, and the sandbox copies the whole
+    skill directory at start, so all eight copies had fresh mtimes and "most recently modified" among them was
+    essentially random. In a measured run, sb_53449 picked another task's untouched initial file and grading reported
+    ``G4 golden None, got 'd'``: the agent had done nothing wrong; grading had compared the wrong file.
 
-    所以顺序是：任务里点名的那个输出名 → 排除掉与随技能分发的初始工作簿**字节相同**的
-    文件之后剩下的最新一个 → 都没有就返回 ``None``，由调用方判为不通过。
+    So the order is: the output name the task specifies → the newest file left after excluding files **byte-identical**
+    to the initial workbooks shipped with the skill → otherwise ``None``, which the caller grades as not passed.
     """
     root = Path(root)
     if not root.is_dir():
@@ -337,7 +343,7 @@ def find_produced(root: Path, *, expected: str = "", shipped: Iterable[Path] = (
         hit = [f for f in xlsx if f.name == expected]
         if hit:
             return hit[0]
-    # 随技能分发的那些初始工作簿逐字节剔掉。就地改写过的那一份字节已经变了，会留下来。
+    # drop the initial workbooks shipped with the skill, byte for byte. One modified in place has new bytes and stays.
     seen = {f.read_bytes() for f in shipped if Path(f).is_file()}
     fresh = [f for f in xlsx if f.read_bytes() not in seen]
     if not fresh:

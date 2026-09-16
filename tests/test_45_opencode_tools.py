@@ -1,9 +1,9 @@
 """Native OpenCode bridge: result identity, real tools and runtime entry point."""
+import shutil
+from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-import shutil
 from types import SimpleNamespace
-from contextlib import contextmanager
 
 import pytest
 
@@ -68,9 +68,10 @@ def test_native_read_failure_is_not_reported_as_success(native, tmp_path):
 def test_xlsx_entry_uses_native_tools_and_saves_trace(tmp_path, monkeypatch):
     if not shutil.which("opencode"):
         pytest.skip("OpenCode binary required")
-    from hexis.cli import run as run_fsm
-    from hexis.machine.schema import Machine, State, ToolAction, EndAction, Transition, Variable, Terminal
     import json
+
+    from hexis.cli import run as run_fsm
+    from hexis.machine.schema import EndAction, Machine, State, Terminal, ToolAction, Transition, Variable
 
     m = Machine(skill_id="native-smoke", initial="copy", fallback="FALLBACK", variables=[
         Variable(name="input_path", init_from="task.input.input_path"),

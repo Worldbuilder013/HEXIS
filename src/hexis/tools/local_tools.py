@@ -1,9 +1,11 @@
-"""本机执行器：在作业目录里直接执行机器的原生工具调用，不经 OpenCode。
+"""Local executor: runs the machine's native tool calls directly in the job directory, without OpenCode.
 
-结果形状与 OpenCode 后端一致（ok / returncode / stdout / stderr），工具定义取注册表 ``backends/opencode.json``。
-实现了注册表里的全部七个原生工具：``bash``（subprocess）、``read`` / ``write`` / ``edit``（文本文件）、
-``list`` / ``glob`` / ``grep``（目录与检索）。相对路径一律相对作业目录解析。
-``python_bin`` 所在目录会插到 PATH 最前面，命令里的 ``python3`` 因此解析到带 openpyxl 的解释器。
+The result shape matches the OpenCode backend (ok / returncode / stdout / stderr), and tool definitions come from
+the registry ``backends/opencode.json``. All seven native tools of the registry are implemented: ``bash``
+(subprocess), ``read`` / ``write`` / ``edit`` (text files), ``list`` / ``glob`` / ``grep`` (directories and search).
+Relative paths are always resolved against the job directory.
+The directory containing ``python_bin`` is put at the front of PATH, so ``python3`` in commands resolves to the
+interpreter that has openpyxl.
 """
 from __future__ import annotations
 
@@ -44,13 +46,13 @@ class LocalTools:
     def describe_tools(self) -> dict:
         return {n: self._reg[n] for n in self.available_tools if n in self._reg}
 
-    # ---- 路径 ---- #
+    # ---- paths ---- #
     def _path(self, p: Optional[str]) -> Path:
         s = str(p or "").strip()
         q = Path(s) if s else self.workdir
         return q if q.is_absolute() else (self.workdir / q)
 
-    # ---- 调用 ---- #
+    # ---- calls ---- #
     def call(self, name: str, inp: dict) -> dict:
         inp = dict(inp or {})
         fn = getattr(self, f"_t_{name}", None)

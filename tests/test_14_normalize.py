@@ -1,31 +1,41 @@
-"""⑭ 动作规范化：轨迹里的 dict 与机器里的模型折成同一个 KEY，松紧两档各守各的边界。
+"""(14) Action normalization: dicts in traces and models in machines fold into the same KEY; the loose and strict modes each keep their own boundary.
 
-这套断言是给日后「把 compiler._sig / replay._action_matches 指到 normalize 上」上的保险：
-只要分组关系不变，重指就不会改变行为。
+These assertions are insurance for later "pointing compiler._sig / replay._action_matches at
+normalize": as long as the grouping stays the same, re-pointing does not change behaviour.
 """
 
 import json
 
-from hexis.legacy import compiler, replay
 from hexis.examples import table_clean as tc
-from hexis.traces.normalize import (
-    action_writes, canon_action, canon_output, canon_tool_name, same_action,
-)
+from hexis.legacy import compiler, replay
 from hexis.machine.schema import (
-    EndAction, JudgeAction, ModelAction, Record, ToolAction, UserAction,
+    EndAction,
+    JudgeAction,
+    ModelAction,
+    Record,
+    ToolAction,
+    UserAction,
+)
+from hexis.traces.normalize import (
+    action_writes,
+    canon_action,
+    canon_output,
+    canon_tool_name,
+    same_action,
 )
 
-Q = "当前 header_row 是否符合 SKILL.md S2.1 的规范判据"
-PROMPT = "把 rows 里的数据改写成一段摘要"
+Q = "does the current header_row satisfy the canonical criterion of SKILL.md S2.1"
+PROMPT = "rewrite the data in rows as a short summary"
 
 
 # --------------------------------------------------------------------------- #
-# 轨迹 dict ←→ 机器模型：五种 kind 都得折出同一个 KEY
+# trace dict <-> machine model: all five kinds must fold into the same KEY
 # --------------------------------------------------------------------------- #
-#: (名字, 运行时形状的 Record, 等价的 Action 模型)。judge 记 question/reads、user 只记 kind，
-#: writes 一律靠 output 反推。这里的 model 记录**刻意只写 kind**：它代表「没把 prompt 记下来」
-#: 的那一类记录（外部/旧轨迹、以及 user），今天的 runtime._model_action 是会记模板的，
-#: 那一档由下面 rich 那组覆盖。
+#: (name, Record in runtime shape, equivalent Action model). judge records question/reads, user
+#: records only kind, and writes are always inferred from output. The model record here
+#: **deliberately has only kind**: it stands for records that "did not record the prompt"
+#: (external/old traces, and user); today's runtime._model_action does record the template,
+#: which is covered by the rich group below.
 _RUNTIME_PAIRS = [
     ("tool",
      Record(step=1, action={"kind": "tool", "name": "scripts/math_verify.py",
@@ -35,11 +45,11 @@ _RUNTIME_PAIRS = [
                 reads=["expr"], writes=["verified"])),
     ("judge",
      Record(step=2, action={"kind": "judge", "prompt": Q, "reads": ["header_row"]},
-            output={"header_ok": "规范"}),
+            output={"header_ok": "canonical"}),
      JudgeAction(prompt=Q, reads=["header_row"], writes=["header_ok"],
                  labels=list(tc.LABELS))),
     ("model",
-     Record(step=3, action={"kind": "model"}, output={"ok": True, "summary": "略"}),
+     Record(step=3, action={"kind": "model"}, output={"ok": True, "summary": "omitted"}),
      ModelAction(prompt=PROMPT, reads=["rows"], writes=["summary"])),
     ("user",
      Record(step=4, action={"kind": "user"}, output={"answer": "42"}),
@@ -51,21 +61,21 @@ _RUNTIME_PAIRS = [
 
 
 def test_record_and_action_model_agree_loose_for_all_five_kinds():
-    """松档：五种 kind 的轨迹记录与机器动作折出同一个 KEY。回放靠的就是这条。"""
+    """Loose mode: trace records and machine actions of all five kinds fold into the same KEY. Replay relies on exactly this."""
     for name, rec, act in _RUNTIME_PAIRS:
         assert canon_action(rec) == canon_action(act), name
 
 
 def test_record_and_action_model_agree_strict_for_all_five_kinds():
-    """严档：只要轨迹把区分字段记下来（judge 与 model 的 prompt），五种
-    kind 在编译档下同样一致。"""
+    """Strict mode: as long as the trace records the distinguishing field (the prompt of judge and
+    model), all five kinds agree in the compile mode as well."""
     rich = [
         ("tool", Record(step=1, action={"kind": "tool", "name": "MATH_VERIFY"}),
          ToolAction(name="scripts/math-verify.py")),
         ("judge", _RUNTIME_PAIRS[1][1], _RUNTIME_PAIRS[1][2]),
         ("model",
          Record(step=3, action={"kind": "model", "prompt": PROMPT},
-                output={"ok": True, "summary": "略"}),
+                output={"ok": True, "summary": "omitted"}),
          ModelAction(prompt=PROMPT, reads=["rows"], writes=["summary"])),
         ("user",
          Record(step=4, action={"kind": "user", "prompt": PROMPT},
@@ -78,13 +88,16 @@ def test_record_and_action_model_agree_strict_for_all_five_kinds():
 
 
 def test_a_record_without_a_prompt_field_is_loose_comparable_only():
-    """记录里**没有** prompt 字段时，model/user 的严档就跨不了源——松档照常对上。
+    """When a record has **no** prompt field, the strict key of model/user cannot match across sources -- the loose key still matches.
 
-    这不是 bug，是记录格式的事实：一条不记提示词的记录拿不出区分字段，严档只能退化成
-    ``(kind, writes=…)``，与带 prompt 的机器动作必然不等。今天 ``user`` 记录正是这样
-    （runtime 拒绝执行 user 动作，只记 ``{"kind": "user"}``），外部轨迹与 runtime 那一轮
-    之前的旧轨迹也一样。runtime 现在给 model 记模板原文，所以真实的 model 记录走的是上面
-    ``test_..._strict_for_all_five_kinds`` 那条路——两种情形都钉住，免得日后当成偶然。
+    This is not a bug but a fact of the record format: a record that does not store the prompt
+    has no distinguishing field, so its strict key can only degrade to ``(kind, writes=…)``,
+    which never equals a machine action with a prompt. ``user`` records are exactly like that
+    today (the runtime refuses to execute user actions and records only ``{"kind": "user"}``),
+    and so are external traces and old traces from before that runtime revision. The runtime
+    now records the raw template for model, so real model records take the path of
+    ``test_..._strict_for_all_five_kinds`` above -- both cases are pinned so they are not
+    mistaken for an accident later.
     """
     rec, act = _RUNTIME_PAIRS[2][1], _RUNTIME_PAIRS[2][2]
     assert canon_action(rec) == canon_action(act)
@@ -92,33 +105,34 @@ def test_a_record_without_a_prompt_field_is_loose_comparable_only():
 
 
 def test_raw_record_dict_and_bare_action_dict():
-    """整条记录（含 output）折出的 KEY 与 Record 一致；只给裸 action dict 则 writes 退化成空。
+    """The KEY folded from a whole record (with output) equals the Record's; a bare action dict alone degrades writes to empty.
 
-    后者正是 compiler._sig 今天的处境（它只拿得到 ``rec.action``），所以退化后的严档恰好等于
-    ``("judge", prompt)`` 那套分组——不会更错，但也别指望更准：要准就传整条 Record。
+    The latter is exactly compiler._sig's situation today (it only gets ``rec.action``), so the
+    degraded strict key happens to equal the ``("judge", prompt)`` grouping -- no worse, but no
+    more precise either: pass the whole Record for precision.
     """
     act = {"kind": "judge", "prompt": Q, "reads": ["header_row"]}
-    out = {"header_ok": "规范"}
-    raw = {"step": 2, "action": act, "output": out}                 # JSONL 里的一行
+    out = {"header_ok": "canonical"}
+    raw = {"step": 2, "action": act, "output": out}                 # one line of JSONL
     rec = Record(step=2, action=act, output=out)
     assert canon_action(raw) == canon_action(rec)
     assert canon_action(raw, strict=True) == canon_action(rec, strict=True)
-    assert action_writes(act) == []                                 # 裸 dict 没有 output
+    assert action_writes(act) == []                                 # a bare dict has no output
     assert canon_action(act, strict=True) == ("judge", "writes=", "prompt=" + Q)
 
 
 def test_writes_are_recovered_from_the_record_output():
-    """judge 的 output 就是 {写入变量: 标签}；其余动作的 ok/error 是状态位、不算写入。"""
+    """A judge's output is exactly {written variable: label}; ok/error of other actions are status bits, not writes."""
     assert action_writes(_RUNTIME_PAIRS[1][1]) == ["header_ok"]
-    assert action_writes(_RUNTIME_PAIRS[2][1]) == ["summary"]      # ok 被剔掉
-    assert action_writes(_RUNTIME_PAIRS[1][2]) == ["header_ok"]    # 模型侧是声明的
+    assert action_writes(_RUNTIME_PAIRS[2][1]) == ["summary"]      # ok is dropped
+    assert action_writes(_RUNTIME_PAIRS[1][2]) == ["header_ok"]    # declared on the model side
 
 
 # --------------------------------------------------------------------------- #
-# 工具名
+# Tool names
 # --------------------------------------------------------------------------- #
 def test_canon_tool_name_collapses_path_case_and_dashes():
-    """整个 s3（校验）状态的成环都押在这次折叠上：三种写法必须收敛成一个名字。"""
+    """The loop of the whole s3 (check) state hinges on this folding: the three spellings must converge to one name."""
     names = ["scripts/math_verify.py", "math-verify", "MATH_VERIFY"]
     assert {canon_tool_name(n) for n in names} == {"math_verify"}
     assert canon_tool_name("skills\\Math-Verify.PY") == "math_verify"
@@ -134,20 +148,20 @@ def test_tool_key_uses_the_canonical_name():
 
 
 # --------------------------------------------------------------------------- #
-# 两档的分界
+# The boundary between the two modes
 # --------------------------------------------------------------------------- #
 def test_strict_splits_judges_by_question_loose_does_not():
-    """同样写 ok_label 的两个提问：编译档必须分开（两个语义分岔），回放档不必。"""
-    j1 = JudgeAction(prompt="表头规范吗", reads=["header_row"],
+    """Two questions that both write ok_label: the compile mode must keep them apart (two semantic branches), the replay mode need not."""
+    j1 = JudgeAction(prompt="is the header canonical?", reads=["header_row"],
                      writes=["ok_label"], labels=list(tc.LABELS))
-    j2 = JudgeAction(prompt="金额对得上吗", reads=["amount"],
+    j2 = JudgeAction(prompt="do the amounts match?", reads=["amount"],
                      writes=["ok_label"], labels=list(tc.LABELS))
     assert same_action(j1, j2)
     assert not same_action(j1, j2, strict=True)
 
 
 def test_judge_writes_participate_in_both_modes():
-    """写不同变量 = 后续条件读到的东西不同 = 不是同一步，两档都分。"""
+    """Writing different variables = later conditions read different things = not the same step; both modes split them."""
     j1 = JudgeAction(prompt=Q, reads=["header_row"], writes=["header_ok"],
                      labels=list(tc.LABELS))
     j2 = JudgeAction(prompt=Q, reads=["header_row"], writes=["amount_ok"],
@@ -157,32 +171,32 @@ def test_judge_writes_participate_in_both_modes():
 
 
 def test_loose_splits_tools_but_never_their_arguments():
-    """参数活在变量里，不属于状态身份——两次 fix_header 是同一步，不是两步。"""
+    """Arguments live in variables and are not part of the state identity -- two fix_header calls are one step, not two."""
     fix_a = Record(step=1, action={"kind": "tool", "name": "fix_header",
-                                   "input": {"header_row": "名称,,日期"}},
-                   output={"ok": True, "header_row": "名称,列2,日期"})
+                                   "input": {"header_row": "name,,date"}},
+                   output={"ok": True, "header_row": "name,col2,date"})
     fix_b = Record(step=2, action={"kind": "tool", "name": "fix_header",
-                                   "input": {"header_row": "名称,列2,Unnamed: 2"}},
-                   output={"ok": True, "header_row": "名称,列2,列3"})
+                                   "input": {"header_row": "name,col2,Unnamed: 2"}},
+                   output={"ok": True, "header_row": "name,col2,col3"})
     export = Record(step=3, action={"kind": "tool", "name": "export",
                                     "input": {"output_path": "out.csv"}},
                     output={"ok": True, "output_path": "out.csv"})
     assert same_action(fix_a, fix_b)
-    assert same_action(fix_a, fix_b, strict=True)      # 参数在严档同样不参与
+    assert same_action(fix_a, fix_b, strict=True)      # arguments take no part in strict mode either
     assert not same_action(fix_a, export)
 
 
 def test_model_prompt_never_enters_the_loose_key():
-    """渲染过的 prompt 里带着题面：计进松档 KEY，每一步都独一无二，回放全废。"""
-    m1 = ModelAction(prompt="解这道题：1+1=?", writes=["answer"])
-    m2 = ModelAction(prompt="解这道题：积分 ∫x dx", writes=["answer"])
+    """A rendered prompt carries the problem statement: counting it in the loose KEY makes every step unique and breaks replay entirely."""
+    m1 = ModelAction(prompt="solve this problem: 1+1=?", writes=["answer"])
+    m2 = ModelAction(prompt="solve this problem: integral ∫x dx", writes=["answer"])
     assert same_action(m1, m2)
     assert not same_action(m1, m2, strict=True)
     assert all("1+1" not in part for part in canon_action(m1))
 
 
 def test_end_terminal_participates_in_both_modes():
-    """结束方式不同就不是同一步——这是松档比 replay._action_matches 细的地方，有意为之。"""
+    """A different way of ending is not the same step -- this is where loose mode is finer than replay._action_matches, intentionally."""
     e1, e2 = EndAction(terminal="done"), EndAction(terminal="give_up")
     assert not same_action(e1, e2)
     assert not same_action(e1, e2, strict=True)
@@ -199,14 +213,14 @@ def test_different_kinds_never_collide():
 
 
 # --------------------------------------------------------------------------- #
-# 产出裁剪与 KEY 的稳定性
+# Output trimming and KEY stability
 # --------------------------------------------------------------------------- #
 def test_canon_output_keeps_declared_drops_the_rest():
-    out = {"header_row": "a,b", "rows": [["1"]], "ok": True, "debug": "噪声"}
+    out = {"header_row": "a,b", "rows": [["1"]], "ok": True, "debug": "noise"}
     assert canon_output(out, ["header_row", "rows"]) == {"header_row": "a,b",
                                                         "rows": [["1"]]}
-    assert canon_output(out, ["missing"]) == {}          # 声明了但没产出
-    assert canon_output(out, []) == {}                   # 什么都没声明就什么都不收
+    assert canon_output(out, ["missing"]) == {}          # declared but not produced
+    assert canon_output(out, []) == {}                   # nothing declared, nothing collected
     assert canon_output({}, ["header_row"]) == {}
 
 
@@ -218,7 +232,7 @@ def test_canon_output_is_order_independent():
 
 
 def test_keys_are_hashable_json_serialisable_and_stable():
-    """跨进程稳定：不用 hash()/id()，不吃 dict 插入顺序。两次构造 json.dumps 逐字相同。"""
+    """Stable across processes: no hash()/id(), no dependence on dict insertion order. json.dumps of two constructions is byte-identical."""
     a = Record(step=1, action={"kind": "judge", "prompt": Q, "reads": ["x"]},
                output={"p": 1, "q": 2})
     b = Record(step=9, action={"reads": ["x"], "prompt": Q, "kind": "judge"},
@@ -228,11 +242,11 @@ def test_keys_are_hashable_json_serialisable_and_stable():
         assert ka == kb
         assert json.dumps(ka, ensure_ascii=False) == json.dumps(kb, ensure_ascii=False)
         assert isinstance(ka, tuple) and all(isinstance(p, str) for p in ka)
-        assert len({ka, kb}) == 1                        # 可哈希、且是同一个键
+        assert len({ka, kb}) == 1                        # hashable, and the same key
 
 
 # --------------------------------------------------------------------------- #
-# 交叉验证：拿 table_clean 的记录表，比对既有两份实现的分组
+# Cross-check: compare the grouping of the two existing implementations on the table_clean records
 # --------------------------------------------------------------------------- #
 def _table_clean_records(make_traces):
     recs = [r for t in make_traces(6, seed=1) for r in t.records]
@@ -242,10 +256,10 @@ def _table_clean_records(make_traces):
 
 
 def test_loose_grouping_equals_replay_action_matches(make_traces):
-    """松档在 table_clean 上与 replay._action_matches 的分组**逐对相同**。
+    """On table_clean, loose mode groups **pair by pair identically** to replay._action_matches.
 
-    这是日后把 replay 指到 normalize 上的保险：比较的正是 replay 真实的用法——机器某状态的
-    动作 × 轨迹某步的记录。
+    This is insurance for pointing replay at normalize later: what is compared is exactly how
+    replay really uses it -- the action of a machine state x the record of a trace step.
     """
     recs = _table_clean_records(make_traces)
     machine = tc.reference_machine()
@@ -255,11 +269,11 @@ def test_loose_grouping_equals_replay_action_matches(make_traces):
             pairs += 1
             assert replay._action_matches(state.action, rec.action) == \
                 same_action(state.action, rec), (state.id, rec.step, rec.action)
-    assert pairs > 100                                   # 真跑了一张表，不是空循环
+    assert pairs > 100                                   # really ran over a table, not an empty loop
 
 
 def test_strict_grouping_equals_compiler_sig(make_traces):
-    """严档在 table_clean 上与 compiler._sig 的分组**逐对相同**（重指编译器的保险）。"""
+    """On table_clean, strict mode groups **pair by pair identically** to compiler._sig (insurance for re-pointing the compiler)."""
     recs = _table_clean_records(make_traces)
     for x in recs:
         for y in recs:
@@ -268,7 +282,7 @@ def test_strict_grouping_equals_compiler_sig(make_traces):
 
 
 def test_records_of_the_same_step_land_in_one_class(make_traces):
-    """同一状态跑出来的记录，无论参数差多远，都归到同一个 KEY；不同状态互不相并。"""
+    """Records produced by the same state land in the same KEY however far apart their arguments are; different states never merge."""
     recs = _table_clean_records(make_traces)
     by_key: dict = {}
     for r in recs:

@@ -1,16 +1,20 @@
-"""候选机器构造（算法文档第 5 节）：M' = Modify(M_k, π*)。全部修改在副本上进行。
+"""Candidate machine construction: M' = Modify(M_k, π*). All modifications are made on a copy.
 
-状态怎么造，由 :class:`StepContract` 决定：这一步的目的、读什么、写什么、用哪个工具、
-前置与后置条件、它落实的文档原文。合同的内容来自事件（叙述、调用参数）、工具定义与技能规则；
-本模块只把合同组织成提示词与参数模板，不含任何技能、工具或字段的名字。
+How a state is built is decided by its :class:`StepContract`: the purpose of the step, what it reads, what it
+writes, which tool it uses, its preconditions and postconditions, and the document text it implements. The contract
+content comes from events (narration, call arguments), tool definitions and skill rules; this module only turns the
+contract into prompts and parameter templates and contains no skill, tool or field names.
 
-* 工具状态的参数模板：与某个任务输入取值完全相同的字段 → ``${field}``；注册表标为常量的
-  字段与非字符串值 → 原样保留；其余字符串字段 → 由前置的生成状态（模型）在运行时生成。
-* 产出字段按工具定义收；语义变量绑到工具的主要输出。
-* 已有转移增加使用次数；缺少的新增，条件用工具自己的成功判据。同一条件多目标、多条无条件
-  → 判断状态。多次调用 → 循环判断。首个事件够不到入口 → 调整入口。
-* 回边装计数，上限 K_q = ⌈1.5·max{1,N_q}⌉，达到上限转入回退状态；已有上限继续保留，
-  访问更多次时抬高。
+* Parameter template of a tool state: a field whose value equals some task input value exactly → ``${field}``;
+  fields the registry marks as constant, and non-string values → kept verbatim; other string fields → generated at
+  run time by a preceding generation state (the model).
+* Output fields are collected according to the tool definition; semantic variables are bound to the tool's primary
+  output.
+* Existing transitions get their usage count increased; missing ones are added, guarded by the tool's own success
+  condition. The same guard with several targets, or several unconditional edges → judge state. Several calls →
+  loop judge. First event not reachable from the entry → adjust the entry.
+* Back edges get a counter with bound K_q = ⌈1.5·max{1,N_q}⌉; reaching the bound leads to the fallback state;
+  existing bounds are kept and raised when the state is visited more often.
 """
 from __future__ import annotations
 
@@ -20,24 +24,47 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional, Sequence
 
-from hexis.machine import cond as _cond
-from hexis.machine.schema import (EndAction, JudgeAction, Machine, ModelAction, State, Terminal, ToolAction,
-                      Transition, UserAction, Variable)
-from hexis.tools.toolspec import ToolSpec
+from hexis.compiler import check as _check
 from hexis.compiler.align import NEW, Alignment
-from hexis.compiler.common import (ABSTAIN, back_edges, branch_class, counter_exit, entry_anchors, guaranteed,
-                     maybe_true, need, reaches, seed_vars, status_known, summary_of, task_inputs,
-                     zero_paths)
+from hexis.compiler.common import (
+    ABSTAIN,
+    back_edges,
+    branch_class,
+    counter_exit,
+    entry_anchors,
+    guaranteed,
+    maybe_true,
+    need,
+    reaches,
+    seed_vars,
+    status_known,
+    summary_of,
+    task_inputs,
+    zero_paths,
+)
 from hexis.compiler.context import CompileContext, event_matches
 from hexis.compiler.traces import Event, Prepared
-from hexis.compiler import check as _check
+from hexis.machine import cond as _cond
+from hexis.machine.schema import (
+    EndAction,
+    JudgeAction,
+    Machine,
+    ModelAction,
+    State,
+    Terminal,
+    ToolAction,
+    Transition,
+    UserAction,
+    Variable,
+)
+from hexis.tools.toolspec import ToolSpec
 
 ORIGIN_TRACE = "trace"
 ORIGIN_COMPILER = "compiler"
 
 
 # --------------------------------------------------------------------------- #
-# 步骤合同
+# Step contract
 # --------------------------------------------------------------------------- #
 @dataclass
 class StepContract:
@@ -48,10 +75,11 @@ class StepContract:
     preconditions: list = field(default_factory=list)
     postconditions: list = field(default_factory=list)
     source_requirements: list = field(default_factory=list)
-    examples: list = field(default_factory=list)          # 轨迹里观察到的调用参数（原样，截断）
+    examples: list = field(default_factory=list)          # call arguments observed in traces (verbatim, truncated)
 
     def prompt(self, sid: str, kind: str) -> str:
-        """把合同组织成一段提示词。措辞不含任何技能与工具知识，全部来自合同字段。"""
+        """Turn the contract into a prompt. The wording carries no skill or tool knowledge; everything comes from the
+        contract fields."""
         what = {"gate": f"produce the values {self.output_fields} that the next step needs",
                 "output": f"produce the deliverable content of this step as {self.output_fields}",
                 "user": f"ask the user and record the answer as {self.output_fields}"}[kind]
@@ -93,7 +121,7 @@ class Builder:
         self.changes: list[str] = []
         self._ensure_fallback()
 
-    # ---- 小工具 ---- #
+    # ---- helpers ---- #
     def note(self, s: str) -> None:
         self.changes.append(s)
 
@@ -122,14 +150,15 @@ class Builder:
             if not any(t.id == tid for t in self.m.terminals):
                 self.m.terminals.append(Terminal(id=tid, kind="fallback"))
             self.m.states[fb] = State(id=fb, action=EndAction(terminal=tid), origin=ORIGIN_COMPILER)
-            self.note(f"补上回退状态 {fb}")
+            self.note(f"added missing fallback state {fb}")
 
     def _sort(self, sid: str) -> None:
         st = self.m.states[sid]
         st.transitions = [t for t in st.transitions if t.cond] + [t for t in st.transitions if not t.cond]
 
     def counter_guards(self, sid: str, cond: str) -> str:
-        """给一条新的带条件转移并上该状态已有的计数上限（cnt < K），与上限出口互斥。"""
+        """Conjoin a new guarded transition with the counter bounds the state already has (cnt < K), so that it is
+        mutually exclusive with the bound exits."""
         if not cond:
             return cond
         terms = [cond]
@@ -139,10 +168,10 @@ class Builder:
                 terms.append(f"{ce[0]} < {ce[1]}")
         return " and ".join(terms)
 
-    # ---- 合同 ---- #
+    # ---- contract ---- #
     def contract(self, ev: Event, *, tool: Optional[ToolSpec] = None,
                  inputs: Sequence[str] = (), outputs: Sequence[str] = ()) -> StepContract:
-        """从事件、工具定义和技能规则拼出这一步的合同。"""
+        """Assemble the contract of this step from the event, the tool definition and the skill rules."""
         task_in = self.prep.task_input
         earlier = self.prep.events[:ev.index]
         quotes: list[str] = []
@@ -177,7 +206,7 @@ class Builder:
                             postconditions=post, source_requirements=list(dict.fromkeys(quotes)),
                             examples=examples)
 
-    # ---- 状态构造 ---- #
+    # ---- state construction ---- #
     def make_gate(self, sid: str, ev: Event, vars_: list[str], spec: ToolSpec,
                   extra_reads: Sequence[str] = ()) -> str:
         gid = self.unique(f"{sid}_gate")
@@ -193,7 +222,7 @@ class Builder:
         return gid
 
     def tool_template(self, sid: str, ev: Event, spec: ToolSpec) -> tuple[dict, list[str]]:
-        """参数模板与需要生成的变量。"""
+        """Parameter template and the variables that must be generated."""
         base = dict(ev.calls[-1].input) if ev.calls else {}
         task_in = self.prep.task_input
         by_value: dict = {}
@@ -201,7 +230,7 @@ class Builder:
             if isinstance(v, (str, int, float)) and str(v):
                 by_value.setdefault(str(v), k)
                 if isinstance(v, str) and "/" in v and v.rsplit("/", 1)[-1]:
-                    by_value.setdefault(v.rsplit("/", 1)[-1], k)     # 同名文件的相对写法
+                    by_value.setdefault(v.rsplit("/", 1)[-1], k)     # relative spelling of the same file
         constants = spec.constant_keys()
         template: dict = {}
         generated: list[str] = []
@@ -219,9 +248,10 @@ class Builder:
     def make_tool_state(self, sid: str, ev: Event, *, origin: str,
                         keep_writes: Sequence[str] = (), keep_binds: Optional[dict] = None,
                         extra_reads: Sequence[str] = ()) -> str:
-        """新建（或重建）一个工具状态的动作，返回它的入口（生成门或自身）。
+        """Create (or rebuild) the action of a tool state and return its entry (its gate or the state itself).
 
-        重建时保留原有的输出映射里源字段在新工具产出中仍存在的那些；仍未绑定的语义变量绑到主要输出。"""
+        When rebuilding, keep the existing output mappings whose source field is still produced by the new tool;
+        semantic variables that remain unbound are bound to the primary output."""
         spec = self.ctx.spec(ev.tool)
         known = set(spec.output_keys())
         semantic = [w for w in keep_writes if w not in known]
@@ -265,17 +295,18 @@ class Builder:
         sid = self.new_id("t")
         if ev.kind == "tool":
             self.make_tool_state(sid, ev, origin=ORIGIN_TRACE)
-            self.note(f"新增状态 {sid}：{ev.describe()}")
+            self.note(f"added state {sid}: {ev.describe()}")
         elif ev.kind == "model":
             self.make_model_state(sid, ev)
-            self.note(f"新增可观察模型状态 {sid}")
+            self.note(f"added observable model state {sid}")
         elif ev.kind == "user":
             self.make_user_state(sid, ev)
-            self.note(f"新增用户状态 {sid}")
+            self.note(f"added user state {sid}")
         return sid
 
     def gates_of(self, sid: str) -> list[str]:
-        """专门给 sid 生成参数的模型状态：零宽、除计数上限出口外唯一后继是 sid。"""
+        """Model states that only generate parameters for sid: zero-width, and apart from counter bound exits their only
+        successor is sid."""
         out = []
         for g, st in self.m.states.items():
             if st.action.kind != "model" or getattr(st.action, "observable", False):
@@ -286,7 +317,8 @@ class Builder:
         return out
 
     def retire_gate(self, old: str, new: str) -> None:
-        """旧生成门让位给新生成门：进旧门的边改进新门，旧门的上限出口搬过去，旧门删除。"""
+        """The old gate gives way to the new gate: edges into the old gate now enter the new gate, the old gate's bound
+        exits move over, and the old gate is deleted."""
         if self.m.initial == old:
             self.m.initial = new
         exits = [t for t in self.m.states[old].transitions if counter_exit(t.cond)]
@@ -299,7 +331,7 @@ class Builder:
         for e in exits:
             self.m.states[new].transitions.insert(0, e)
         del self.m.states[old]
-        self.note(f"生成门 {old} 由 {new} 取代")
+        self.note(f"gate {old} replaced by {new}")
 
     def realize(self, sid: str, ev: Event) -> None:
         st = self.m.states[sid]
@@ -316,17 +348,17 @@ class Builder:
             for g in old_gates:
                 if g != entry and g in self.m.states:
                     self.retire_gate(g, entry)
-        self.note(f"更换工具 {sid}：{old_tool} → {ev.tool}")
+        self.note(f"changed tool of {sid}: {old_tool} → {ev.tool}")
 
     def add_labels(self, sid: str, ev: Event) -> None:
         a = self.m.states[sid].action
         have = set(getattr(a, "labels", []) or [])
         if ev.labels - have:
             a.labels = sorted(have | set(ev.labels))
-            self.note(f"{sid}: 标签 {sorted(have)} → {a.labels}")
+            self.note(f"{sid}: labels {sorted(have)} → {a.labels}")
 
     def redirect_in_edges(self, sid: str, entry: str) -> None:
-        """把进入 sid 的边改到它的生成门；计数上限出口跟着搬。"""
+        """Redirect the edges into sid to its gate; counter bound exits move along."""
         if self.m.initial == sid:
             self.m.initial = entry
         for src, st in self.m.states.items():
@@ -346,7 +378,8 @@ class Builder:
             self.m.states[to].transitions.insert(0, e)
 
     def complete_binds(self, sid: str) -> None:
-        """复用状态时补充缺失的输出映射：未绑定的语义变量绑到主要输出（每次只绑首个）。"""
+        """When a state is reused, add missing output mappings: an unbound semantic variable is bound to the primary
+        output (only the first one each time)."""
         st = self.m.states[sid]
         a = st.action
         if a.kind != "tool":
@@ -358,11 +391,12 @@ class Builder:
         if semantic and spec.primary and spec.primary not in (a.binds or {}):
             a.binds = dict(a.binds or {})
             a.binds[spec.primary] = semantic[0]
-            self.note(f"{sid}: 输出映射 {spec.primary} → {semantic[0]}")
+            self.note(f"{sid}: output mapping {spec.primary} → {semantic[0]}")
 
-    # ---- 变量供给 ---- #
+    # ---- variable supply ---- #
     def generator_for(self, missing: set[str], q: str) -> Optional[str]:
-        """能写出 missing 且能到达 q 的模型状态；优先只经零宽状态到达的，其次路径最短的。"""
+        """A model state that can write missing and can reach q; prefer one that reaches q through zero-width states
+        only, then the one with the shortest path."""
         cands = [sid for sid, st in self.m.states.items()
                  if st.action.kind == "model" and not getattr(st.action, "observable", False)
                  and missing <= set(st.action.writes)]
@@ -380,7 +414,7 @@ class Builder:
         return best[2] if best else None
 
     def entry_of(self, q: str) -> str:
-        """进入 q 该从哪儿进：所需变量不在 A_0 里时，找它的生成状态。"""
+        """Where to enter q: when the variables it needs are not in A_0, find the state that generates them."""
         st = self.m.states[q]
         if st.action.kind != "tool":
             return q
@@ -389,13 +423,13 @@ class Builder:
             return q
         return self.generator_for(missing, q) or q
 
-    # ---- 转移 ---- #
+    # ---- transitions ---- #
     def bump(self, path) -> None:
         for _sid, t in path:
             t.support = int(t.support or 0) + 1
 
     def success_cond(self, p: str, b: Optional[bool]) -> str:
-        """从工具状态 p 出发、结果为 b 的新转移条件：工具的成功判据或它的否定。"""
+        """Guard of a new transition leaving tool state p with outcome b: the tool's success condition or its negation."""
         st = self.m.states[p]
         if b is None or st.action.kind != "tool":
             return ""
@@ -426,17 +460,18 @@ class Builder:
             if g is not None:
                 target = g
             else:
-                self.note(f"{p}→{q} 缺少 {sorted(missing)}，没有模型状态能补，交由检查决定")
+                self.note(f"{p}→{q} lacks {sorted(missing)} and no model state can supply it; left to the check")
         self.add_edge(p, cond, target)
         return "add"
 
     def is_our_judge(self, sid: str) -> bool:
-        """由更新阶段引入的判断状态（分岔判断与循环判断）：可以继续加选项。"""
+        """Judge states introduced by the update stage (branch judges and loop judges): more options may be added."""
         st = self.m.states.get(sid)
         return st is not None and st.action.kind == "judge" and st.origin == ORIGIN_TRACE
 
     def same_condition(self, p: str, existing: str, new: str) -> bool:
-        """两条护卫算不算「同一条件」：都无条件，或成功 / 失败分支类别相同（计数项不参与）。"""
+        """Whether two guards count as "the same condition": both unconditional, or the same success / failure branch
+        class (counter terms are ignored)."""
         if not new or not existing:
             return (not new) and (not existing)
         st = self.m.states[p]
@@ -449,12 +484,12 @@ class Builder:
             if t.to == target:
                 t.support = int(t.support or 0) + 1
                 return
-        if same:                                       # 同一条件对应多个目标 → 判断状态
+        if same:                                       # same guard with several targets → judge state
             e = same[0]
             if self.is_our_judge(e.to):
                 self.extend_judge(e.to, target)
                 return
-            if cond == "":                             # 多条无条件转移：使用次数最多的做默认
+            if cond == "":                             # several unconditional transitions: the most used one is the default
                 default, other = (e.to, target) if int(e.support or 0) >= 1 else (target, e.to)
             else:
                 default, other = e.to, target
@@ -464,7 +499,7 @@ class Builder:
             self._sort(p)
             return
         uncond = [t for t in st.transitions if not t.cond]
-        if cond and uncond:                            # 新的条件边会遮住已有的无条件边
+        if cond and uncond:                            # the new guarded edge would shadow the existing unconditional edge
             e = uncond[0]
             if self.is_our_judge(e.to):
                 self.extend_judge(e.to, target)
@@ -478,10 +513,11 @@ class Builder:
         if cond and not any(not t.cond for t in st.transitions):
             st.transitions.append(Transition(cond="", to=self.m.fallback, origin=ORIGIN_COMPILER))
         self._sort(p)
-        self.note(f"新增转移 {p} → {target}" + (f" [{cond}]" if cond else ""))
+        self.note(f"added transition {p} → {target}" + (f" [{cond}]" if cond else ""))
 
     def judge_reads(self, p: str) -> list[str]:
-        """判断优先读前一步的内容产出（最多三个，排除状态字段）；缺少时读首个任务输入；再没有读状态字段。"""
+        """A judge preferably reads the content outputs of the previous step (at most three, status fields excluded);
+        otherwise the first task input; failing that, a status field."""
         st = self.m.states[p]
         g = guaranteed(st, self.ctx)
         status = set(self.ctx.spec(st.action.name).status_keys) if st.action.kind == "tool" else set()
@@ -508,7 +544,7 @@ class Builder:
                                labels=[default, other, ABSTAIN], abstain=ABSTAIN),
             transitions=[Transition(cond=f"{var} == '{other}'", to=other, support=1, origin=ORIGIN_TRACE),
                          Transition(cond="", to=default, origin=ORIGIN_TRACE)])
-        self.note(f"新增判断 {jid}（{p} 之后：默认 {default}，另选 {other}）")
+        self.note(f"added judge {jid} (after {p}: default {default}, alternative {other})")
         return jid
 
     def extend_judge(self, jid: str, target: str) -> None:
@@ -525,9 +561,9 @@ class Builder:
         st.transitions.append(Transition(cond=f"{var} == '{target}'", to=target, support=1,
                                          origin=ORIGIN_TRACE))
         self._sort(jid)
-        self.note(f"判断 {jid} 增加选项 {target}")
+        self.note(f"judge {jid} gained option {target}")
 
-    # ---- 循环 ---- #
+    # ---- loops ---- #
     def loop_judge(self, q: str) -> None:
         lid = f"{q}_loop"
         if lid in self.m.states:
@@ -541,12 +577,12 @@ class Builder:
         back = self.entry_of(q)
         succ = self.success_cond(q, True)
         orig = list(st.transitions)
-        exits = [t for t in orig if counter_exit(t.cond)]                  # 上限出口只属于 q
+        exits = [t for t in orig if counter_exit(t.cond)]                  # bound exits belong to q only
         rest = [t for t in orig if not counter_exit(t.cond)]
         if succ:
             ok_known, fail_known = status_known(self.ctx, st, True), status_known(self.ctx, st, False)
-            keep = exits + [t for t in rest if maybe_true(t.cond, fail_known)]   # 失败侧留在 q
-            moved = [t for t in rest if maybe_true(t.cond, ok_known)]           # 成功侧搬进循环判断
+            keep = exits + [t for t in rest if maybe_true(t.cond, fail_known)]   # the failure side stays on q
+            moved = [t for t in rest if maybe_true(t.cond, ok_known)]           # the success side moves into the loop judge
             first_cond = self.counter_guards(q, succ)
         else:
             keep, moved, first_cond = exits, rest, ""
@@ -566,28 +602,28 @@ class Builder:
             action=JudgeAction(prompt=prompt, reads=self.judge_reads(q), writes=[var],
                                labels=["again", "continue", ABSTAIN], abstain=ABSTAIN),
             transitions=edges)
-        self.note(f"增加循环判断 {lid}（回到 {back}）")
+        self.note(f"added loop judge {lid} (back to {back})")
 
-    # ---- 计数 ---- #
+    # ---- counters ---- #
     def install_counters(self, visits: dict) -> None:
         for src, e in back_edges(self.m):
             tgt = e.to
             if not e.inc:
                 e.inc = f"{tgt}_count"
-                self.note(f"回边 {src}→{tgt} 装计数 {e.inc}")
+                self.note(f"back edge {src}→{tgt} gets counter {e.inc}")
             self.ensure_var(e.inc, "integer", 0)
             cnt = e.inc
             t = self.m.states[tgt]
             k = math.ceil(1.5 * max(1, int(visits.get(tgt, 1))))
             old = next((counter_exit(g.cond) for g in t.transitions if counter_exit(g.cond)
                         and counter_exit(g.cond)[0] == cnt), None)
-            if old is not None:                           # 已有计数和上限出口继续保留
-                if k > old[1]:                            # 候选路径访问更多次：抬高上限（全机器同名引用一起改）
+            if old is not None:                           # an existing counter and bound exit are kept
+                if k > old[1]:                            # the candidate path visits more often: raise the bound (every reference in the machine changes too)
                     for st2 in self.m.states.values():
                         for g in st2.transitions:
                             g.cond = re.sub(rf"\b{re.escape(cnt)} (>=|<) {old[1]}\b",
                                             lambda mm: f"{cnt} {mm.group(1)} {k}", g.cond or "")
-                    self.note(f"{tgt}: 上限 {cnt} {old[1]} → {k}")
+                    self.note(f"{tgt}: bound {cnt} {old[1]} → {k}")
                 continue
             if any(g.cond and cnt in _cond.vars_of(g.cond) for g in t.transitions):
                 continue
@@ -596,15 +632,16 @@ class Builder:
                     g.cond = f"{cnt} < {k} and ({g.cond})"
             t.transitions.insert(0, Transition(cond=f"{cnt} >= {k}", to=self.m.fallback,
                                                origin=ORIGIN_COMPILER))
-            self.note(f"{tgt}: 上限 {cnt} >= {k} → {self.m.fallback}")
+            self.note(f"{tgt}: bound {cnt} >= {k} → {self.m.fallback}")
 
 
 def build_candidate(m: Machine, prep: Prepared, alignment: Alignment, ctx: CompileContext) -> Build:
-    """按对齐路径构造候选机器。返回候选、对齐后的可观察状态路径与修改记录。"""
+    """Build the candidate machine along the alignment path. Returns the candidate, the aligned path of observable
+    states and the change log."""
     bd = Builder(m, prep, ctx)
     events = prep.events
     resolved: list[str] = []
-    # 1. 状态：新增 / 更换工具 / 补标签与映射
+    # 1. states: add / change tool / complete labels and mappings
     for slot in alignment.slots:
         ev = events[slot.index]
         if slot.is_new:
@@ -619,31 +656,31 @@ def build_candidate(m: Machine, prep: Prepared, alignment: Alignment, ctx: Compi
             elif ev.kind == "tool":
                 bd.complete_binds(sid)
         resolved.append(sid)
-    # 2. 入口
+    # 2. entry
     first = alignment.slots[0]
     q1 = resolved[0]
     if first.edge == "start":
         entry = bd.entry_of(q1)
         bd.m.initial = entry
-        bd.note(f"入口改为 {entry}")
+        bd.note(f"entry changed to {entry}")
     else:
         ea = entry_anchors(bd.m)
         if q1 in ea:
             bd.bump(ea[q1])
-    # 3. 转移
+    # 3. transitions
     for i in range(1, len(resolved)):
         prev = events[alignment.slots[i - 1].index]
         b = prev.ok if prev.kind == "tool" else None
         bd.connect(resolved[i - 1], resolved[i], b)
-    # 4. 循环
+    # 4. loops
     for slot, sid in zip(alignment.slots, resolved):
         if slot.loop and bd.m.states[sid].action.kind == "tool":
             bd.loop_judge(sid)
-    # 5. 候选路径上的访问次数 → 计数上限
+    # 5. visit counts along the candidate path → counter bounds
     rp = _check.replay(bd.m, prep, resolved, ignore_counters=True)
     visits = rp.visits if rp.ok else {}
     if not rp.ok:
-        bd.note(f"装计数前的路径推演未通过：{rp.why}")
+        bd.note(f"path replay before installing counters failed: {rp.why}")
     bd.install_counters(visits)
     bd.m.max_steps = max(int(bd.m.max_steps or 0), 3 * len(bd.m.states) + 16)
     return Build(machine=bd.m, anchors=resolved, changes=bd.changes)

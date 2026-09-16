@@ -1,16 +1,16 @@
-"""`.env` 定位、解析，以及 OpenAI 兼容三件套（MODEL / BASE_URL / API_KEY）。
+"""`.env` discovery and parsing, and the three OpenAI-compatible settings (MODEL / BASE_URL / API_KEY).
 
-真实实验要连活的模型端点，配置就落在仓库根的 `.env` 里。这里只做两件小事：**找到那个
-文件**、**把它变成配置对象**。
+Real experiments connect to live model endpoints, and the configuration lives in the `.env` at the repository
+root. This module does only two small things: **find that file** and **turn it into a configuration object**.
 
-**为什么是「向上走到 .git 那一层」而不是数几个 ``.parent``。** 固定的跳数每次目录搬家都
-会失效。
-所以从自己所在位置逐级向上找 ``.env``，撞到拿着 ``.git`` 的那一层就停——停在检出边界上，
-checkout 之外某个用户目录里的 ``.env`` 永远不会被误捡进来。
+**Why "walk up to the directory holding .git" instead of counting ``.parent`` hops.** A fixed number of hops
+breaks every time the directory layout changes. So we search for ``.env`` upward level by level from where this
+file is, and stop at the directory that holds ``.git`` -- stopping at the checkout boundary means a ``.env`` in
+some user directory outside the checkout is never picked up by mistake.
 
-**密钥不落地。** 本模块（以及拿到 :class:`LLMConfig` 的任何人）绝不打印、记录、写盘
-API key：``LLMConfig`` 的 repr 里没有它，:meth:`LLMConfig.redacted` 只给末 4 位。缺 key
-时的报错点名「缺哪个键」，不带任何取值。
+**API keys never leave memory.** This module (and anyone holding an :class:`LLMConfig`) never prints, logs or
+writes the API key to disk: ``LLMConfig``'s repr does not contain it, and :meth:`LLMConfig.redacted` only shows
+the last 4 characters. When a key is missing, the error names "which key is missing" and carries no values.
 """
 
 from __future__ import annotations
@@ -20,24 +20,25 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping, MutableMapping, Optional
 
-#: 三件套的键名。顺序即报错里的点名顺序。
+#: key names of the three settings. The order is the order in which errors name them.
 REQUIRED_KEYS = ("MODEL", "BASE_URL", "API_KEY")
 
 ENV_FILENAME = ".env"
 
 
 class EnvError(RuntimeError):
-    """配置缺失或不可用。消息里只出现键名与路径，绝不出现键值。"""
+    """Configuration is missing or unusable. Messages contain only key names and paths, never key values."""
 
 
 # --------------------------------------------------------------------------- #
-# 找文件
+# Finding the file
 # --------------------------------------------------------------------------- #
 def find_env_file(start: Optional[Path] = None) -> Optional[Path]:
-    """从 ``start``（默认本文件所在处）逐级向上找 ``.env``，到 ``.git`` 那一层为止。
+    """Search upward from ``start`` (default: where this file is) for ``.env``, up to the directory holding ``.git``.
 
-    同一层里 ``.env`` 先于 ``.git`` 判定——仓库根上的 ``.env`` 因此能被找到；找不到就
-    在检出边界上收手，返回 ``None``，而不是继续往上捡到别的项目的配置。
+    Within one directory ``.env`` is checked before ``.git`` -- so the ``.env`` at the repository root is found;
+    if none is found, the search stops at the checkout boundary and returns ``None`` instead of climbing further
+    and picking up another project's configuration.
     """
     base = Path(start).resolve() if start is not None else Path(__file__).resolve()
     here = base if base.is_dir() else base.parent
@@ -45,16 +46,16 @@ def find_env_file(start: Optional[Path] = None) -> Optional[Path]:
         cand = d / ENV_FILENAME
         if cand.exists():
             return cand
-        if (d / ".git").exists():        # 检出边界：到此为止
+        if (d / ".git").exists():        # checkout boundary: stop here
             break
     return None
 
 
 # --------------------------------------------------------------------------- #
-# 解析
+# Parsing
 # --------------------------------------------------------------------------- #
 def parse_env_text(text: str) -> dict[str, str]:
-    """把 ``KEY=VALUE`` 文本解析成 dict。空行、``#`` 注释行、没有 ``=`` 的行一律跳过。"""
+    """Parse ``KEY=VALUE`` text into a dict. Blank lines, ``#`` comment lines and lines without ``=`` are skipped."""
     parsed: dict[str, str] = {}
     for raw in text.splitlines():
         line = raw.strip()
@@ -67,11 +68,12 @@ def parse_env_text(text: str) -> dict[str, str]:
 
 def load_env(*, path: Optional[Path] = None, override: bool = False,
              environ: Optional[MutableMapping[str, str]] = None) -> dict[str, str]:
-    """读 ``.env`` 并补进环境变量（默认不覆盖已有的），返回解析出的 dict。
+    """Read ``.env`` and add it to the environment variables (existing ones are not overridden by default); returns the parsed dict.
 
-    ``path`` 不给就先从当前工作目录、再从包所在位置用 :func:`find_env_file` 找；找不到就返回空 dict（不是错误——CI 上靠
-    真实环境变量注入是正常的）。``environ`` 不给就是 ``os.environ``（测试可传一个临时
-    dict，避免污染进程环境）。幂等：重复调用不改变结果。
+    Without ``path``, :func:`find_env_file` searches first from the current working directory, then from the
+    package location; if nothing is found an empty dict is returned (not an error -- on CI, injecting real
+    environment variables is normal). Without ``environ`` it is ``os.environ`` (tests can pass a temporary dict
+    to avoid polluting the process environment). Idempotent: repeated calls do not change the result.
     """
     target = Path(path) if path is not None else (find_env_file(Path.cwd()) or find_env_file())
     if target is None or not target.exists():
@@ -85,13 +87,13 @@ def load_env(*, path: Optional[Path] = None, override: bool = False,
 
 
 # --------------------------------------------------------------------------- #
-# 配置对象
+# Configuration object
 # --------------------------------------------------------------------------- #
 def redact(secret: str) -> str:
-    """密钥的可展示形式：只留末 4 位。空串给 ``'<unset>'``。
+    """Displayable form of an API key: only the last 4 characters. An empty string gives ``'<unset>'``.
 
-    打码前缀用 ASCII 的 ``***``：这行字要进 Windows 控制台和日志文件，别为了好看
-    赌一个非 ASCII 字符能被那边的编码放过。
+    The mask prefix is ASCII ``***``: this string goes to Windows consoles and log files, so do not bet on a
+    non-ASCII character surviving their encoding just for looks.
     """
     s = secret or ""
     if not s:
@@ -101,9 +103,9 @@ def redact(secret: str) -> str:
 
 @dataclass(frozen=True)
 class LLMConfig:
-    """OpenAI 兼容端点的三件套。``api_key`` **不进 repr**（dataclass 的 ``repr=False``）。
+    """The three settings of an OpenAI-compatible endpoint. ``api_key`` is **not in the repr** (dataclass ``repr=False``).
 
-    要展示时用 :meth:`redacted`；日志、轨迹、报错里一律只能出现它。
+    Use :meth:`redacted` for display; logs, traces and error messages may only ever contain that.
     """
 
     model: str
@@ -115,27 +117,32 @@ class LLMConfig:
         return bool(self.model and self.base_url and self.api_key)
 
     def redacted(self) -> str:
-        """一行摘要，密钥已打码。可以安全地写进日志。"""
+        """A one-line summary with the API key masked. Safe to write to logs."""
         return f"model={self.model} base_url={self.base_url} api_key={redact(self.api_key)}"
 
 
-#: 端点档案：``--provider minimax`` 读 ``MINIMAX_API_KEY`` / ``MINIMAX_MODEL`` / ``MINIMAX_BASE_URL``，
-#: 后两者缺省用这里的值。模型与端点取 docs/HARNESS_CALIBRATION.md 标定过的那一套。
+#: endpoint profiles: ``--provider minimax`` reads ``MINIMAX_API_KEY`` / ``MINIMAX_MODEL`` / ``MINIMAX_BASE_URL``,
+#: and the latter two default to the values here. The model and endpoint are the ones used for harness calibration.
 PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
     "minimax": {"MODEL": "MiniMax-M2.5-highspeed", "BASE_URL": "https://api.minimaxi.com/v1"},
     "deepseek": {"MODEL": "deepseek-v4-flash", "BASE_URL": "https://api.deepseek.com"},
 }
 
 
-def llm_config(*, environ: Optional[Mapping[str, str]] = None, profile: str = "") -> LLMConfig:
-    """从环境（必要时先读 ``.env``）取三件套，缺哪个就点名哪个。
+def llm_config(*, environ: Optional[Mapping[str, str]] = None, profile: str = "", model: str = "",
+               base_url: str = "", api_key_env: str = "") -> LLMConfig:
+    """Get the three settings from the environment (reading ``.env`` first if needed), naming whichever is missing.
 
-    ``environ`` 显式给了就**不**再读 ``.env``、也不碰 ``os.environ``——测试与多端点并存
-    时靠它把配置来源钉死。``profile`` 给了就读带前缀的三件套（``MINIMAX_API_KEY`` …），
-    model / base_url 缺省取 :data:`PROFILE_DEFAULTS`；密钥没有缺省。
+    If ``environ`` is given explicitly, ``.env`` is **not** read and ``os.environ`` is not touched -- tests and
+    setups with several endpoints use it to pin the configuration source. If ``profile`` is given, the prefixed
+    settings are read (``MINIMAX_API_KEY`` ...), with model / base_url defaulting to :data:`PROFILE_DEFAULTS`; the
+    API key has no default.
+
+    ``model`` and ``base_url`` override the values from the environment, and ``api_key_env`` names the variable
+    that holds the key instead of ``API_KEY`` / ``<PROFILE>_API_KEY``. Errors name only the missing settings.
     """
     if environ is None:
-        load_env()                       # 幂等；不覆盖已有的环境变量
+        load_env()                       # idempotent; does not override existing environment variables
         env: Mapping[str, str] = os.environ
     else:
         env = environ
@@ -143,23 +150,39 @@ def llm_config(*, environ: Optional[Mapping[str, str]] = None, profile: str = ""
         pf = profile.strip().lower()
         pre = pf.upper() + "_"
         dflt = PROFILE_DEFAULTS.get(pf, {})
-        model = (env.get(pre + "MODEL") or dflt.get("MODEL") or "").strip()
-        base = (env.get(pre + "BASE_URL") or dflt.get("BASE_URL") or "").strip()
-        key = (env.get(pre + "API_KEY") or "").strip()
+        key_name = api_key_env or pre + "API_KEY"
+        model = (model or env.get(pre + "MODEL") or dflt.get("MODEL") or "").strip()
+        base = (base_url or env.get(pre + "BASE_URL") or dflt.get("BASE_URL") or "").strip()
+        key = (env.get(key_name) or "").strip()
         need = [n for n, v in ((pre + "MODEL", model), (pre + "BASE_URL", base),
-                               (pre + "API_KEY", key)) if not v]
+                               (key_name, key)) if not v]
         if need:
             where = find_env_file()
-            loc = str(where) if where else f"（没找到 {ENV_FILENAME}）"
-            raise EnvError(f"端点档案 {pf} 缺少 {', '.join(need)}：请在 {loc} 或环境变量里设置。"
-                           f"（本消息不打印任何键值）")
+            loc = str(where) if where else f"(no {ENV_FILENAME} found)"
+            raise EnvError(f"endpoint profile {pf} is missing {', '.join(need)}; set the missing keys in {loc} or in the environment "
+                           f"(this message does not print any values)")
         return LLMConfig(model=model, base_url=base, api_key=key)
-    missing = [k for k in REQUIRED_KEYS if not (env.get(k) or "").strip()]
+    key_name = api_key_env or "API_KEY"
+    settings = {"MODEL": (model or env.get("MODEL") or "").strip(),
+                "BASE_URL": (base_url or env.get("BASE_URL") or "").strip(),
+                key_name: (env.get(key_name) or "").strip()}
+    missing = [k for k in ("MODEL", "BASE_URL", key_name) if not settings[k]]
     if missing:
         where = find_env_file()
-        loc = str(where) if where else f"（没找到 {ENV_FILENAME}）"
+        loc = str(where) if where else f"(no {ENV_FILENAME} found)"
         raise EnvError(
-            f"LLM 配置缺少 {', '.join(missing)}：请在 {loc} 或环境变量里设置。"
-            f"（本消息不打印任何键值）")
-    return LLMConfig(model=env["MODEL"].strip(), base_url=env["BASE_URL"].strip(),
-                     api_key=env["API_KEY"].strip())
+            f"LLM configuration is missing {', '.join(missing)}; set the missing keys in {loc} or in the environment "
+            f"(this message does not print any values)")
+    return LLMConfig(model=settings["MODEL"], base_url=settings["BASE_URL"], api_key=settings[key_name])
+
+
+def endpoint_record(cfg: LLMConfig, provider: str = "") -> dict:
+    """Provider, model and base URL for logs and manifests: no key, no credentials or query in the URL."""
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(cfg.base_url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    clean = urlunsplit((parts.scheme, host, parts.path, "", "")) if parts.scheme else cfg.base_url.split("?")[0]
+    return {"provider": provider or "default", "model": cfg.model, "base_url": clean}

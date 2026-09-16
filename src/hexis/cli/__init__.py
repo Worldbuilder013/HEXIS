@@ -14,8 +14,11 @@ from hexis import __version__
 COMMANDS: dict[str, tuple[str, str]] = {
     "compile": ("hexis.cli.compile",
                 "Build a machine from a skill document and traces (initialization + trace update)."),
+    "update": ("hexis.cli.update",
+               "Update a compiled machine with new traces; a model decides every trace step."),
     "compile-stepwise": ("hexis.cli.compile_stepwise",
                          "Update a machine trace by trace with externally supplied step decisions."),
+    "guide": ("hexis.cli.guide", "Write GUIDE.md and PROMPT.md (a prompt for agents) for a compiled machine."),
     "run": ("hexis.cli.run", "Execute a machine on one task."),
     "collect": ("hexis.cli.collect", "Collect skill-execution traces with OpenCode on spreadsheet tasks."),
     "fold-traces": ("hexis.cli.fold_traces", "Fold the OpenCode event streams of a benchmark run into traces."),

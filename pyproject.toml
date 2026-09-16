@@ -33,7 +33,7 @@ dependencies = [
 xlsx = ["openpyxl>=3.1"]                                   # SpreadsheetBench grading
 memory = ["numpy>=1.26", "sentence-transformers>=2.7"]     # ReasoningBank embedding index
 all = ["hexis-agent[xlsx,memory]"]
-dev = ["pytest>=8.0", "build>=1.2", "twine>=6.1"]
+dev = ["pytest>=8.0", "build>=1.2", "twine>=6.1", "ruff>=0.6"]
 
 [project.scripts]
 hexis-agent = "hexis.cli:main"
@@ -52,3 +52,11 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+# syntax errors and undefined names; style is not enforced
+select = ["E9", "F63", "F7", "F82"]

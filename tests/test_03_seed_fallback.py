@@ -1,8 +1,8 @@
-"""③ 初始机器全回退：起点直接进 FALLBACK，任意接受轨迹都被平凡复述。"""
+"""The initial machine is all fallback: the start goes straight into FALLBACK, and any accepted trace is trivially reproduced."""
 
-from hexis.legacy import replay
-from hexis.execution import runtime
 from hexis.examples import table_clean as tc
+from hexis.execution import runtime
+from hexis.legacy import replay
 from hexis.machine.schema import FALLBACK, empty_machine
 
 
@@ -13,12 +13,12 @@ def test_empty_machine_starts_at_fallback():
 
 
 def test_empty_machine_reproduces_any_trace():
-    """空机器一进 FALLBACK 就是解释模式，对任何轨迹回放都平凡通过。"""
+    """The empty machine is in interpretation mode as soon as it enters FALLBACK, so replaying any trace on it trivially passes."""
     ref = tc.reference_machine()
     em = empty_machine("table-clean")
     for task in tc.gen_tasks(6, seed=7):
         fs = tc.MemFS(task["files"])
-        # 用一台真机器跑出一条真轨迹，再拿空机器回放它
+        # run a real machine to produce a real trace, then replay it on the empty machine
         res = runtime.run_task(ref, task, model=tc.build_model(),
                                tools=tc.build_registry(fs), doc=tc.skill_doc())
         assert replay.reproduces(em, res.trace)

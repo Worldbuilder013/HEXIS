@@ -1,8 +1,8 @@
-"""② 评判正确：客观验收对，且触犯禁止性要求（覆盖原文件）即使结果对也判拒。"""
+"""Judging is correct: the objective acceptance check is right, and violating a prohibition (overwriting the source file) is rejected even when the result is correct."""
 
-from hexis.traces import judge
-from hexis.execution import runtime
 from hexis.examples import table_clean as tc
+from hexis.execution import runtime
+from hexis.traces import judge
 
 
 def _run(task):
@@ -20,17 +20,17 @@ def test_clean_task_is_accepted():
 
 
 def test_overwriting_source_is_rejected_even_when_result_is_correct():
-    """output_path == path：结果表头照样规范（验收会过），但触犯 P1，必须判拒。"""
+    """output_path == path: the resulting header is still well-formed (acceptance passes), but P1 is violated, so the run must be rejected."""
     task = {"task_id": "p1",
             "input": {"path": "x.csv", "output_path": "x.csv", "request": "r"},
-            "files": {"x.csv": {"header": ["名称", "数量"], "rows": [["a", "1"]]}}}
+            "files": {"x.csv": {"header": ["name", "quantity"], "rows": [["a", "1"]]}}}
     res = _run(task)
-    assert tc.verify(task, res.trace), "前提：结果本身是对的"
+    assert tc.verify(task, res.trace), "precondition: the result itself is correct"
     v = judge.evaluate(res.trace, lambda t: tc.verify(task, t),
                        tc.reference_machine().prohibitions)
     assert v.verdict == "rejected"
     assert v.reason.endswith("P1")
-    assert v.error_step is not None                # 拒绝轨迹必带出错位置
+    assert v.error_step is not None                # a rejected trace must carry the error location
 
 
 def test_judged_stamps_verdict_onto_a_new_trace():
@@ -39,4 +39,4 @@ def test_judged_stamps_verdict_onto_a_new_trace():
     stamped = judge.judged(res.trace, lambda t: tc.verify(task, t),
                            tc.reference_machine().prohibitions)
     assert stamped.verdict == "accepted"
-    assert res.trace.verdict == "unknown"          # 原 trace 不被改
+    assert res.trace.verdict == "unknown"          # the original trace is not modified

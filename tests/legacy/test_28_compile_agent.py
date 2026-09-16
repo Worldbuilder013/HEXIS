@@ -1,34 +1,40 @@
-"""㉘ 算法 1「顺序转写编译」：编译智能体 + 确定性守门程序。
+"""Algorithm 1 "sequential transcription compilation": compile agent + deterministic gatekeeper.
 
-盯的是 :mod:`hexis.legacy.compile_agent` 与 :mod:`hexis.legacy.checker` 之间的分工：**智能体只
-提议，守门程序才写机器**。所以这套测试问四件事——
+Focus: the division of labour between :mod:`hexis.legacy.compile_agent` and
+:mod:`hexis.legacy.checker`: **the agent only proposes; only the gatekeeper writes the machine**. So
+these tests ask four things --
 
-1. ``model=None`` 走确定性启发式时，编出来的机器结构上一条问题都没有，且每条接受轨迹都
-   复述得出来（**「没有模型也必须能编出一台正确的机器」是这套方法的地板**）；
-2. 会破坏互斥的提议被守门程序**拒掉**，而**它之前被接受的提议一个都不掉**；
-3. 同一个点上连拒两次 ⇒ ``demote_to_fallback``，退回解释执行，**不是崩**；
-4. 覆盖报告说得出「这条条款没有任何轨迹碰过」「这条循环上限是我加的」。
+1. with ``model=None`` (deterministic heuristics) the compiled machine has no structural issue at all,
+   and every accepted trace replays (**"a correct machine must be compilable even without a model" is
+   the floor of the method**);
+2. a proposal that would break mutual exclusion is **rejected** by the gatekeeper, while **none of the
+   proposals accepted before it are lost**;
+3. two rejections in a row at the same point => ``demote_to_fallback``, falling back to interpreted
+   execution, **not a crash**;
+4. the coverage report can say "no trace ever touched this clause" and "this loop bound was added by
+   the compiler".
 
-外加一条底线：同样的输入编两次，机器**逐字节相同**。
+Plus one baseline: compiling the same input twice yields a **byte-for-byte identical** machine.
 
-密闭：``model=None``，不碰网络、不写文件；轨迹由 conftest 的 ``accepted`` 夹具用手写参考
-机器 + 脚本模型桩现造。
+Hermetic: ``model=None``, no network, no file writes; traces are generated on the fly by conftest's
+``accepted`` fixture from a hand-written reference machine + scripted model stub.
 """
 
 import json
 
 import pytest
 
-from hexis.machine import checks
-from hexis.legacy import compile_agent, replay, report
+from hexis.examples import table_clean as tc
 from hexis.execution import runtime
+from hexis.legacy import compile_agent, replay, report
 from hexis.legacy.checker import Checker
 from hexis.legacy.compile_agent import Proposal, apply_plan, compile_skill, draft_judge
-from hexis.examples import table_clean as tc
 from hexis.llm.model_iface import ScriptedModel
+from hexis.machine import checks
 from hexis.machine.schema import FALLBACK, Record, Trace
 
-#: 轨迹与编译结果都是确定性的，按 (条数, 种子) 缓存一份，别让每个用例都重跑一遍 24 个任务。
+#: Traces and compile results are deterministic; cache one per (count, seed) so each test does not
+#: rerun all 24 tasks.
 _TRACES: dict = {}
 _COMPILED: dict = {}
 
@@ -51,9 +57,10 @@ def _judge_state(machine):
 
 
 def _neg_trace() -> Trace:
-    """一条拒绝轨迹：读完直接导出，**跳过了表头检查**，出错位置就在导出那一步。"""
-    inp = {"path": "in.csv", "output_path": "out.csv", "request": "清洗这张表并导出"}
-    bad = ",单价,库存"
+    """A rejected trace: export right after reading, **skipping the header check**; the error is at the
+    export step."""
+    inp = {"path": "in.csv", "output_path": "out.csv", "request": "Clean this table and export it"}
+    bad = ",unit_price,stock"
     rows = [["v0", "v1", "v2"]]
     v1 = {**inp, "header_row": bad, "rows": rows}
     v2 = {**v1, "output_path": "out.csv"}
@@ -76,13 +83,13 @@ def _neg_trace() -> Trace:
 
 
 # --------------------------------------------------------------------------- #
-# ① model=None：确定性启发式也必须编出一台正确的机器
+# (1) model=None: deterministic heuristics must also compile a correct machine
 # --------------------------------------------------------------------------- #
 def test_compiles_the_toy_with_no_model(accepted):
     res = _compiled(accepted)
     assert checks.structural_findings(res.machine) == [], \
         checks.structural_findings(res.machine)
-    assert res.stats["model_calls"] == 0            # 一次模型都没调
+    assert res.stats["model_calls"] == 0            # not a single model call
     assert res.stats["committed"] is True, res.stats["commit"]
 
 
@@ -90,34 +97,35 @@ def test_every_accepted_trace_replays(accepted):
     res = _compiled(accepted)
     traces = _traces(accepted)
     bad = [t.task.get("task_id") for t in traces if not replay.reproduces(res.machine, t)]
-    assert bad == [], f"这些接受轨迹复述不出来: {bad}"
+    assert bad == [], f"these accepted traces do not replay: {bad}"
 
 
 def test_learns_read_judge_repair_export(accepted):
-    """四段主干都学到了，且修复成了一个**带计数、带上限出口**的环。"""
+    """All four main-path segments are learned, and repair becomes a loop **with a counter and a bound
+    exit**."""
     m = _compiled(accepted).machine
     names = {s.action.name for s in m.states.values() if s.action.kind == "tool"}
     assert {"read_csv", "fix_header", "export"} <= names
     assert any(s.action.kind == "judge" for s in m.states.values())
 
     back = [(src, t) for src, t in m.transitions_all() if t.inc]
-    assert back, "修复该形成一条带计数的回边"
+    assert back, "repair should form a back edge with a counter"
     for _src, t in back:
         tgt = m.states[t.to]
         assert any(g.cond and t.inc in g.cond for g in tgt.transitions), \
-            "回边的计数变量必须在目标状态上有一条上限出口"
+            "the back edge's counter variable must have a bound exit on the target state"
 
 
 def test_branch_condition_is_built_on_the_judge_output(accepted):
     m = _compiled(accepted).machine
     j = _judge_state(m)
     guarded = [t for t in j.transitions if t.cond and t.to != FALLBACK]
-    assert len(guarded) >= 2, "判断之后应当有两条带条件的分支"
+    assert len(guarded) >= 2, "there should be two guarded branches after the judge"
     assert all(j.action.writes[0] in t.cond for t in guarded)
 
 
 def test_compiled_machine_runs_fresh_tasks(accepted):
-    """学出的机器要泛化到没见过的任务，而不是把训练轨迹背下来。"""
+    """The learned machine must generalize to unseen tasks rather than memorize the training traces."""
     m = _compiled(accepted).machine
     ok = 0
     for task in tc.gen_tasks(20, seed=99):
@@ -130,16 +138,19 @@ def test_compiled_machine_runs_fresh_tasks(accepted):
 
 
 def _neg_overwrite() -> Trace:
-    """一条**结构上与正例一模一样**的拒绝轨迹：导出目标就是源文件（触犯 P1）。
+    """A rejected trace **structurally identical to the positive ones**: the export target is the source
+    file (violates P1).
 
-    这种反例在图上没有可偏离之处——它要靠禁止项拦，而编译产物没有禁止项（``table_clean``
-    这个技能对象本身不带 ``prohibitions``，编译器也不会从手写参考机器上顺手拿）。所以它逼
-    出的正是 L12 的最后一招：修不动就退回解释执行。
+    Such a negative example has no point of divergence on the graph -- it has to be stopped by a
+    prohibition, and the compiled artifact has no prohibitions (the ``table_clean`` skill object itself
+    carries no ``prohibitions``, and the compiler does not pick them up from the hand-written reference
+    machine). So it forces exactly L12's last resort: if it cannot be repaired, fall back to interpreted
+    execution.
     """
-    inp = {"path": "in.csv", "output_path": "in.csv", "request": "清洗这张表并导出"}
-    good, rows = "名称,数量,日期", [["v0", "v1", "v2"]]
+    inp = {"path": "in.csv", "output_path": "in.csv", "request": "Clean this table and export it"}
+    good, rows = "name,quantity,date", [["v0", "v1", "v2"]]
     v1 = {**inp, "header_row": good, "rows": rows}
-    v2 = {**v1, "header_ok": "规范"}
+    v2 = {**v1, "header_ok": "well_formed"}
     return Trace(
         task={"task_id": "neg-overwrite", "input": dict(inp)},
         verdict="rejected", error_step=3,
@@ -149,7 +160,7 @@ def _neg_overwrite() -> Trace:
                    output={"ok": True, "header_row": good, "rows": rows}, vars=v1),
             Record(step=2, action={"kind": "judge", "prompt": tc.JUDGE_Q,
                                    "reads": ["header_row"]},
-                   output={"header_ok": "规范"}, vars=v2),
+                   output={"header_ok": "well_formed"}, vars=v2),
             Record(step=3, action={"kind": "tool", "name": "export",
                                    "input": {"header_row": good, "rows": rows,
                                              "output_path": "in.csv",
@@ -160,7 +171,8 @@ def _neg_overwrite() -> Trace:
 
 
 def test_negative_trace_is_excluded(accepted):
-    """L12：跳过表头检查的反例，机器要在它的出错位置或更早偏离。"""
+    """L12: for the negative example that skips the header check, the machine must diverge at its error
+    position or earlier."""
     res = compile_skill(tc, _traces(accepted), [_neg_trace()], model=None)
     assert replay.excludes(res.machine, _neg_trace())
     assert res.coverage["verify"]["excluded"] == 1
@@ -168,16 +180,18 @@ def test_negative_trace_is_excluded(accepted):
 
 
 def test_unexcludable_negative_forces_a_demotion(accepted):
-    """L12 的最后一招：排除不掉的反例 ⇒ 把那一段退回解释执行，而不是硬编下去。
+    """L12's last resort: a negative example that cannot be excluded => that segment falls back to
+    interpreted execution instead of being forced through.
 
-    退完之后机器仍然合法、正例仍然复述得出来、那条反例落进「尚不可排除」而不是「漏掉了」
-    ——少编了一截，但没编错。
+    After demotion the machine is still valid, the positive traces still replay, and the negative
+    example lands in "not yet excludable" rather than "missed" -- a bit less was compiled, but nothing
+    was compiled wrong.
     """
     neg = _neg_overwrite()
     res = compile_skill(tc, _traces(accepted), [neg], model=None)
 
     assert res.stats["fallback_demotions"] >= 1
-    assert res.coverage["fallback_surface"]["demoted"], "该记下退了哪个点"
+    assert res.coverage["fallback_surface"]["demoted"], "the demoted point should be recorded"
     assert checks.structural_findings(res.machine) == []
     assert all(replay.reproduces(res.machine, t) for t in _traces(accepted))
     v = res.coverage["verify"]
@@ -186,40 +200,42 @@ def test_unexcludable_negative_forces_a_demotion(accepted):
 
 
 def test_one_trace_is_not_enough_to_compile_anything(accepted):
-    """L14：支持度不足的边整条拿掉。一条轨迹上的边支持度都是 1，**什么都不该编下来**。"""
+    """L14: edges with insufficient support are removed entirely. Every edge of a single trace has
+    support 1, so **nothing should be compiled**."""
     one = [t for t in _traces(accepted) if len(t.records) == 4][:1]
     res = compile_skill(tc, one, (), model=None)
     assert res.stats["thin_edges_dropped"] >= 1
-    assert res.machine.n_states() <= 1                 # 顶多剩个起点，之后全交给解释执行
+    assert res.machine.n_states() <= 1                 # at most the start remains; everything after goes to interpreted execution
     assert checks.structural_findings(res.machine) == []
     assert replay.reproduces(res.machine, one[0])
 
 
 def test_no_traces_yields_a_valid_all_fallback_machine():
-    """没有轨迹就没有可学的东西：交一台合法的、全回退的空机器，而不是崩。"""
+    """No traces means nothing to learn: deliver a valid, all-fallback empty machine instead of
+    crashing."""
     res = compile_skill(tc, (), (), model=None)
     assert res.machine.initial == FALLBACK
     assert checks.structural_findings(res.machine) == []
     assert res.stats["committed"] is True
-    assert report.render(res.coverage).startswith("技能编译覆盖报告")
+    assert report.render(res.coverage).startswith("Skill compilation coverage report")
 
 
 @pytest.mark.parametrize("form,want", [
-    ("module", "table-clean"),                          # examples.table_clean 模块
+    ("module", "table-clean"),                          # the examples.table_clean module
     ("dict", "x"),                                      # {"skill_id": ..., "doc": ...}
-    ("dir", "table-clean"),                             # 一个 Agent Skill 目录
-    ("text", "compiled"),                               # 光一段正文
+    ("dir", "table-clean"),                             # an Agent Skill directory
+    ("text", "compiled"),                               # just a body text
 ])
 def test_skill_argument_forms(accepted, form, want):
     skill = {"module": tc, "dict": {"skill_id": "x", "doc": tc.skill_doc()},
              "dir": str(tc.SKILL_PATH.parent), "text": tc.skill_doc()}[form]
     res = compile_skill(skill, _traces(accepted)[:6], (), model=None)
     assert res.machine.skill_id == want
-    assert len(res.coverage["clause_table"]) == 6       # SKILL.md 切得出 6 条条款
+    assert len(res.coverage["clause_table"]) == 6       # SKILL.md splits into 6 clauses
 
 
 # --------------------------------------------------------------------------- #
-# ② 坏提议被拒，已接受的前缀一个不掉
+# (2) bad proposals are rejected; the accepted prefix loses nothing
 # --------------------------------------------------------------------------- #
 def _open_on(machine) -> Checker:
     ck = Checker(machine.skill_id, thresholds=machine.thresholds)
@@ -228,10 +244,11 @@ def _open_on(machine) -> Checker:
 
 
 def _overlapping(sid: str, cond: str) -> Proposal:
-    """一条会与 ``sid`` 上已有条件重叠的加边提议——违互斥（定理2），必被拒。"""
+    """An add-edge proposal overlapping an existing guard on ``sid`` -- violates mutual exclusion
+    (Theorem 2) and must be rejected."""
     return Proposal("add_transition",
                     {"from_state": sid, "to": FALLBACK, "cond": cond, "support": 4},
-                    rationale="故意与已有分支条件重叠的坏提议")
+                    rationale="bad proposal deliberately overlapping an existing branch guard")
 
 
 def test_mutual_exclusion_breaking_proposal_is_rejected_and_prefix_survives(accepted):
@@ -240,46 +257,47 @@ def test_mutual_exclusion_breaking_proposal_is_rejected_and_prefix_survives(acce
     ck = _open_on(m)
     before = ck.machine.model_dump_json(by_alias=True)
 
-    res = apply_plan(ck, [_overlapping(sid, "header_ok != '弃权'")])
+    res = apply_plan(ck, [_overlapping(sid, "header_ok != 'abstain'")])
 
     assert res.rejected == 1 and res.accepted == 0
     receipt = res.receipts[0]
     assert not receipt.accepted
-    assert "重叠" in receipt.reason or "E_OVERLAP" in receipt.reason, receipt.reason
-    # 被拒的提议**一个字节都没落到机器上**，先前接受的那一批完好无损
+    assert "overlapping" in receipt.reason or "E_OVERLAP" in receipt.reason, receipt.reason
+    # the rejected proposal left **not a single byte on the machine**; the previously accepted batch is intact
     assert ck.machine.model_dump_json(by_alias=True) == before
     assert res.demoted == []
 
 
 def test_two_consecutive_rejections_demote_to_fallback(accepted):
-    """同一个点连拒两次 ⇒ 退回解释执行。**不是崩，也不是硬塞。**"""
+    """Two rejections in a row at the same point => fall back to interpreted execution. **Neither a
+    crash nor forcing it in.**"""
     m = _compiled(accepted).machine
     sid = _judge_state(m).id
     ck = _open_on(m)
 
-    res = apply_plan(ck, [_overlapping(sid, "header_ok != '弃权'"),
-                          _overlapping(sid, "header_ok != '规范'")])
+    res = apply_plan(ck, [_overlapping(sid, "header_ok != 'abstain'"),
+                          _overlapping(sid, "header_ok != 'well_formed'")])
 
     assert res.rejected == 2
     assert res.demoted == [sid], res.demoted
     after = ck.machine
     assert [t.to for t in after.states[sid].transitions] == [FALLBACK]
-    assert after.states[sid].action.kind == "judge"      # 动作还在，只是不再往下编
-    assert checks.structural_findings(after) == []       # 退回之后机器仍然合法
+    assert after.states[sid].action.kind == "judge"      # the action is still there, just not compiled further
+    assert checks.structural_findings(after) == []       # the machine is still valid after demotion
 
 
 def test_one_rejection_alone_does_not_demote(accepted):
-    """一次被拒只记一笔，不该动机器——两次才退。"""
+    """A single rejection is only recorded and must not change the machine -- demotion takes two."""
     m = _compiled(accepted).machine
     sid = _judge_state(m).id
     ck = _open_on(m)
-    res = apply_plan(ck, [_overlapping(sid, "header_ok != '弃权'")])
+    res = apply_plan(ck, [_overlapping(sid, "header_ok != 'abstain'")])
     assert res.demoted == []
     assert len(ck.machine.states[sid].transitions) > 1
 
 
 def test_receipts_cover_every_proposal(accepted):
-    """每条提议一张回执——回滚也不擦，这是审计痕迹。"""
+    """One receipt per proposal -- not erased even on rollback; this is the audit trail."""
     res = _compiled(accepted)
     ops = [r.op for r in res.receipts]
     assert ops[0] == "open_machine"
@@ -289,27 +307,29 @@ def test_receipts_cover_every_proposal(accepted):
 
 
 # --------------------------------------------------------------------------- #
-# ③ 覆盖报告
+# (3) coverage report
 # --------------------------------------------------------------------------- #
 def test_coverage_lists_a_clause_no_trace_touched(accepted):
-    """P1 是禁止性要求，编不进图、也没有任何轨迹「走」到它——必须在报告里点名。"""
+    """P1 is a prohibition: it cannot be compiled into the graph and no trace "walks" to it -- the
+    report must name it."""
     cov = _compiled(accepted).coverage
     assert "P1" in cov["untouched"], cov["untouched"]
     row = next(r for r in cov["clause_table"] if r["id"] == "P1")
     assert row["status"] == "untouched"
     assert row["states"] == [] and row["traces"] == []
-    # model=None ⇒ 条款归属整个留空，报告要如实说是为什么
+    # model=None => clause attribution is left entirely empty, and the report must say so honestly
     assert cov["clause_attribution"] == "none"
     assert set(cov["untouched"]) == {r["id"] for r in cov["clause_table"]}
 
 
 def test_coverage_says_the_loop_bound_is_compiler_introduced(accepted):
-    """SKILL.md 没写过任何圈数上限，K 是编译器为了停机补的——报告必须照实说。"""
+    """SKILL.md never states any iteration bound; K is added by the compiler to guarantee halting --
+    the report must say so."""
     cov = _compiled(accepted).coverage
-    assert cov["loop_bounds"], "有回边就该有 K 的台账"
+    assert cov["loop_bounds"], "with back edges there should be a K ledger"
     for lb in cov["loop_bounds"]:
         assert lb["source"] == "compiler"
-        assert "文档" in lb["why"]
+        assert "document" in lb["why"]
     kinds = {x["kind"] for x in cov["structures"]["compiler_introduced"]}
     assert {"loop_bound", "counter_variable", "branch_guard", "fallback_surface"} <= kinds
 
@@ -320,7 +340,7 @@ def test_coverage_names_what_needs_a_model(accepted):
     assert dep["model_used"] is False
     assert dep["touchpoints"] == list(compile_agent.MODEL_TOUCHPOINTS)
     assert any("learn_cond" in s for s in dep["model_free"])
-    assert any("条款归属" in s for s in dep["needs_model"])
+    assert any("clause attribution" in s for s in dep["needs_model"])
 
 
 def test_coverage_reports_the_fallback_surface(accepted):
@@ -328,12 +348,12 @@ def test_coverage_reports_the_fallback_surface(accepted):
     fb = cov["fallback_surface"]
     assert fb["n_edges_to_fallback"] >= 1
     assert fb["demoted"] == [] and fb["blocked_branches"] == []
-    assert cov["next_traces"], "报告要说得出再补哪些轨迹最值钱"
+    assert cov["next_traces"], "the report should say which additional traces are most valuable"
 
 
 def test_report_renders_the_coverage(accepted):
     text = report.render(_compiled(accepted).coverage)
-    assert "覆盖报告" in text and "T+ 复述" in text
+    assert "coverage report" in text and "T+ replayed" in text
 
 
 def test_diff_vs_reference_matches_the_target_shape(accepted):
@@ -344,12 +364,12 @@ def test_diff_vs_reference_matches_the_target_shape(accepted):
 
 
 # --------------------------------------------------------------------------- #
-# ④ 没有模型就不起草判断动作；起草本身要过模式检查
+# (4) no model means no drafted judge actions; drafting itself must pass the schema check
 # --------------------------------------------------------------------------- #
 def test_no_judge_is_drafted_without_a_model(accepted):
     res = _compiled(accepted)
     assert res.stats["judges_drafted"] == 0
-    assert [j["source"] for j in res.judges] == ["trace"]   # 轨迹里本来就有的判断步
+    assert [j["source"] for j in res.judges] == ["trace"]   # a judge step already in the traces
 
 
 def test_draft_judge_needs_a_model():
@@ -357,11 +377,11 @@ def test_draft_judge_needs_a_model():
 
 
 @pytest.mark.parametrize("reply", [
-    {"labels": ["甲", "乙"]},                      # 缺 question
-    {"prompt": "  ", "labels": ["甲", "乙"]},     # question 是空白
-    {"prompt": "走哪支", "labels": ["甲"]},        # 标签少于两个
-    {"prompt": "走哪支"},                         # 没有标签
-    "不是一个 JSON 对象",                            # 形状就不对
+    {"labels": ["A", "B"]},                        # missing question
+    {"prompt": "  ", "labels": ["A", "B"]},       # question is blank
+    {"prompt": "which branch", "labels": ["A"]},   # fewer than two labels
+    {"prompt": "which branch"},                   # no labels
+    "not a JSON object",                            # wrong shape altogether
 ])
 def test_off_schema_reply_is_a_reject_not_a_guess(reply):
     model = ScriptedModel(gen=lambda p, v, h: reply)
@@ -371,36 +391,38 @@ def test_off_schema_reply_is_a_reject_not_a_guess(reply):
 
 def test_draft_judge_accepts_a_well_formed_reply():
     model = ScriptedModel(gen=lambda p, v, h: {
-        "prompt": "这一支该走哪边", "labels": ["甲", "乙"]})
+        "prompt": "which way should this branch go", "labels": ["A", "B"]})
     j = draft_judge({"state": "s2", "reads": ["x", "y"], "writes": ["verdict"],
                      "targets": {"a": [{"x": 1}], "b": [{"x": 2}]}}, model=model)
     assert j is not None
     assert j.writes == ["verdict"] and j.reads == ["x", "y"]
-    assert compile_agent.ABSTAIN in j.labels        # 弃权是硬性的，模型忘了也要补上
+    assert compile_agent.ABSTAIN in j.labels        # abstain is mandatory; added even if the model forgets it
 
 
 def test_draft_judge_refuses_reads_outside_the_whitelist():
-    """模型想多读一个变量，就是在给判断动作偷偷加上下文——只收白名单里的。"""
+    """A model wanting to read one more variable is sneaking extra context into the judge action --
+    only whitelisted variables are accepted."""
     model = ScriptedModel(gen=lambda p, v, h: {
-        "prompt": "走哪支", "labels": ["甲", "乙"], "reads": ["x", "偷偷加的"]})
+        "prompt": "which branch", "labels": ["A", "B"], "reads": ["x", "sneaked_in"]})
     j = draft_judge({"state": "s2", "reads": ["x"], "writes": ["verdict"],
                      "targets": {"a": [{"x": 1}]}}, model=model)
     assert j is not None and j.reads == ["x"]
 
 
 # --------------------------------------------------------------------------- #
-# ⑤ 有模型时的两处触点（脚本桩，仍然密闭、零成本）
+# (5) the two touchpoints with a model (scripted stub, still hermetic and free)
 # --------------------------------------------------------------------------- #
 _CLAUSE_BY_STEP = {"tool:read_csv": "S1", "tool:fix_header": "S3", "tool:export": "S4"}
 
 
 def _scripted_agent(prompt: str, values: dict) -> str:
-    """一个把两处判定答对的模型桩：新步/重复照 KEY 判，条款归属照动作查表。"""
-    if prompt.startswith("这一步是流程里新的一步"):
-        cands = values.get("同型的已有状态", "（没有）")
-        return "新步" if cands == "（没有）" else "重复:" + cands.split(",")[0]
-    if prompt.startswith("这一步在落实技能文档"):
-        step = values.get("这一步", "")
+    """A model stub that answers both decisions correctly: new step/repeat by KEY, clause attribution
+    by looking up the action."""
+    if prompt.startswith("Is this step a new step in the procedure"):
+        cands = values.get("existing states of the same kind", "(none)")
+        return "new step" if cands == "(none)" else "repeat:" + cands.split(",")[0]
+    if prompt.startswith("Which clause of the skill document"):
+        step = values.get("this step", "")
         if step.startswith("judge:"):
             return "S2.1"
         return _CLAUSE_BY_STEP.get(step, compile_agent.ABSTAIN)
@@ -408,21 +430,22 @@ def _scripted_agent(prompt: str, values: dict) -> str:
 
 
 def test_model_fills_in_clause_attribution(accepted):
-    """条款归属是**要模型**的那一半：给了模型，覆盖报告才说得出每个状态凭哪句话存在。"""
+    """Clause attribution is the half that **needs a model**: only with a model can the coverage report
+    say which sentence each state exists because of."""
     res = compile_skill(tc, _traces(accepted), (), model=ScriptedModel(judge=_scripted_agent))
     assert checks.structural_findings(res.machine) == []
     got = {sid: s.clause for sid, s in res.machine.states.items() if s.clause}
     assert set(got.values()) == {"S1", "S2.1", "S3", "S4"}
     assert res.coverage["clause_attribution"] == "model"
     assert set(res.coverage["supported"]) == {"S1", "S2.1", "S3", "S4"}
-    assert "P1" in res.coverage["untouched"]     # 禁止项永远没有轨迹「走」到
+    assert "P1" in res.coverage["untouched"]     # no trace ever "walks" to a prohibition
     assert res.stats["model_calls"] > 0 and res.stats["model_rejects"] == 0
     assert res.stats["committed"] is True, res.stats["commit"]
 
 
 def test_model_only_changes_attribution_not_the_shape(accepted):
-    """(a)(b) 两处触点答对时，机器的**形状**该和 model=None 那台一模一样——
-    模型只补语义，不改结构。"""
+    """When touchpoints (a)(b) answer correctly, the machine's **shape** must be identical to the
+    model=None one -- the model only adds semantics, it does not change structure."""
     a = _compiled(accepted).machine
     b = compile_skill(tc, _traces(accepted), (),
                       model=ScriptedModel(judge=_scripted_agent)).machine
@@ -433,21 +456,22 @@ def test_model_only_changes_attribution_not_the_shape(accepted):
 
 
 def test_off_schema_new_or_repeat_reply_is_rejected_then_demoted(accepted):
-    """(a) 的回复恒不合模式 ⇒ 同一个点连拒两次 ⇒ 那一段退回解释执行，机器仍然合法。"""
+    """(a)'s reply never fits the schema => two rejections in a row at the same point => that segment
+    falls back to interpreted execution, and the machine is still valid."""
     def always_abstain(prompt, values):
-        return compile_agent.ABSTAIN if prompt.startswith("这一步是流程里新的一步") \
+        return compile_agent.ABSTAIN if prompt.startswith("Is this step a new step in the procedure") \
             else compile_agent.ABSTAIN
 
     res = compile_skill(tc, _traces(accepted), (),
                         model=ScriptedModel(judge=always_abstain))
     assert res.stats["model_rejects"] >= 2
-    assert res.stats["blocked_branches"], "连拒到上限的那个点该被记下来"
+    assert res.stats["blocked_branches"], "the point that hit the rejection limit should be recorded"
     assert checks.structural_findings(res.machine) == []
     assert all(replay.reproduces(res.machine, t) for t in _traces(accepted))
 
 
 # --------------------------------------------------------------------------- #
-# ⑥ 确定性
+# (6) determinism
 # --------------------------------------------------------------------------- #
 def test_compile_skill_is_deterministic(accepted):
     traces = _traces(accepted)
@@ -461,7 +485,7 @@ def test_compile_skill_is_deterministic(accepted):
 
 
 def test_trace_order_does_not_change_the_machine(accepted):
-    """L2 说「步数少的优先」——喂进来的顺序因此不该影响产物。"""
+    """L2 says "fewest steps first" -- so the input order must not affect the artifact."""
     traces = _traces(accepted)
     a = compile_skill(tc, traces, (), model=None)
     b = compile_skill(tc, list(reversed(traces)), (), model=None)

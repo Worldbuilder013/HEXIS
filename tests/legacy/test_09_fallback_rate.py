@@ -1,14 +1,16 @@
-"""⑨ 模拟任务流下回退率随观测积累单调走低。
+"""Under a simulated task stream, the fallback rate falls monotonically as observations accumulate.
 
-机器从轨迹学循环上限 K = ceil(loop_margin × 观测最大圈数)。早期只见过修一轮的任务，K 小，
-遇到要修三轮的任务就计满落进 FALLBACK；见得越多 K 越大，同一条评测流上落入 FALLBACK 的
-比例就降下来。这正是「违约率 = 未学得形态的质量 + 已学得区的弃权率」里第一项随任务流
-缩小的样子。
+The machine learns the loop bound K = ceil(loop_margin × max observed iterations) from traces. Early
+on it has only seen tasks that need one repair round, so K is small, and a task that needs three
+rounds fills the counter and drops into FALLBACK; the more it has seen, the larger K gets, and the
+share of the same evaluation stream that ends up in FALLBACK goes down. This is what it looks like
+when the first term of "violation rate = mass of not-yet-learned forms + abstention rate in the
+learned region" shrinks along the task stream.
 """
 
-from hexis.legacy import compiler
-from hexis.execution import runtime
 from hexis.examples import table_clean as tc
+from hexis.execution import runtime
+from hexis.legacy import compiler
 from hexis.machine.schema import FALLBACK
 
 
@@ -25,17 +27,17 @@ def _fallback_rate(machine, tasks) -> float:
 
 def test_fallback_rate_decreases_with_more_observed_traces(accepted, max_fix):
     pool = accepted(60, seed=2)
-    eval_tasks = [t for t in tc.gen_tasks(30, seed=77)]      # 固定评测流（含要修三轮的）
+    eval_tasks = [t for t in tc.gen_tasks(30, seed=77)]      # fixed evaluation stream (includes tasks needing three repair rounds)
     prohibitions = tc.reference_machine().prohibitions
 
     rates = []
-    for cap in (1, 2, 3):                                    # 逐轮放宽观测：最多见过修 cap 轮的
+    for cap in (1, 2, 3):                                    # widen observations round by round: at most cap repair rounds seen
         train = [t for t in pool if max_fix(t) <= cap]
         cr = compiler.compile(tc.skill_doc(), train, skill_id="tc",
                               prohibitions=prohibitions)
         assert cr.findings == []
         rates.append(_fallback_rate(cr.machine, eval_tasks))
 
-    assert rates == sorted(rates, reverse=True), rates       # 单调不增
-    assert rates[-1] < rates[0], rates                       # 且确实下降
-    assert rates[-1] == 0.0                                  # 学满后评测流不再落回退
+    assert rates == sorted(rates, reverse=True), rates       # monotonically non-increasing
+    assert rates[-1] < rates[0], rates                       # and it really goes down
+    assert rates[-1] == 0.0                                  # once fully learned, the evaluation stream never falls back

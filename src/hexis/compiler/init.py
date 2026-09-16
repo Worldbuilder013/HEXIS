@@ -1,13 +1,15 @@
-"""初始状态机生成（算法文档第 2 节，上下文驱动）。
+"""Initial machine generation (context driven).
 
-模型收到的是 :class:`~hexis.compiler.context.CompileContext`：文档正文、条款表、工具定义
-（名字、参数、产出、成功判据，注明是接口保证还是轨迹推断）、任务输入字段、终点表与技能规则。
-它回一台 efsm-v1 机器。候选逐轮过 G_init = 格式 ∧ 模式 ∧ 条件 ∧ 结构 ∧ 条款 ∧ 工具 ∧ 终点；
-不过就把上一轮候选与错误一起交回模型，默认最多三轮。通过后清空条款编号、规范化、再过更新
-阶段的 Check。
+The model receives a :class:`~hexis.compiler.context.CompileContext`: the document text, the clause table, the tool
+definitions (names, parameters, outputs, success condition, marked as guaranteed by the interface or inferred from
+traces), the task input fields, the terminal table and the skill rules. It returns an efsm-v1 machine. Every round's
+candidate goes through G_init = format ∧ schema ∧ guard ∧ structure ∧ clause ∧ tool ∧ terminal; if it fails, the
+candidate and its errors are handed back to the model, by default for at most three rounds. Once a candidate passes,
+its clause ids are cleared, it is normalized and it goes through the update stage's Check.
 
-技能规则（标签、要求、终点条件）没有显式文件时，由 :func:`extract_rules` 让模型从文档抽取，
-每条都附文档原文，原文核对不过的条目丢弃。规则里只有事件模式，没有工具或字段的解释。
+When the skill rules (labels, requirements, terminal conditions) have no explicit file, :func:`extract_rules` has the
+model extract them from the document; every entry carries its document quote, and entries whose quote does not check
+out are discarded. The rules contain only event patterns, no interpretation of tools or fields.
 """
 from __future__ import annotations
 
@@ -15,12 +17,20 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional, Sequence
 
+from hexis.compiler import check as _check
+from hexis.compiler.context import (
+    CompileContext,
+    EventPattern,
+    LabelRule,
+    Requirement,
+    TerminalCondition,
+    parse_rules,
+    quote_in_document,
+)
+from hexis.llm.model_iface import ModelUnavailable
 from hexis.machine import checks as _checks
 from hexis.machine import cond as _cond
-from hexis.machine.schema import Machine
-from hexis.compiler import check as _check
-from hexis.compiler.context import (CompileContext, EventPattern, LabelRule, Requirement, TerminalCondition,
-                      parse_rules, quote_in_document)
+from hexis.machine.schema import ABSTAIN, Machine
 
 FORMAT_EXAMPLE = {
     "format": "efsm-v1", "skill_id": "<skill_id>", "initial": "s1", "fallback": "FALLBACK",
@@ -50,7 +60,7 @@ FORMAT_EXAMPLE = {
         "s3": {"id": "s3", "clause": "S1.2", "origin": "document",
                "action": {"kind": "judge", "prompt": "Is s2_result what the task asked for? Answer 'ok' or 'redo'.",
                           "reads": ["s2_result"], "writes": ["verdict"],
-                          "labels": ["ok", "redo", "弃权"], "abstain": "弃权"},
+                          "labels": ["ok", "redo", ABSTAIN], "abstain": ABSTAIN},
                "transitions": [{"if": "verdict == 'redo'", "to": "s1", "inc": "retry_count"},
                                {"if": "", "to": "s4"}]},
         "s4": {"id": "s4", "clause": "S1.3", "origin": "document",
@@ -79,7 +89,7 @@ Machine format:
          writes lists the result fields to keep (use the tool's result field names); a semantic name may be added with binds={"<primary result field>": "semantic_name"} and listed in writes.
          phase = the base label of the call: for a tool whose definition in tools carries a label use that label; for generic command tools write "apply" when the command writes something and "probe" when it only reads; otherwise "". labels = derived labels defined by the rules that this state realizes (never the base label).
   model: {kind:"model", prompt, reads, writes, observable?}. One generation without tools; the prompt states what to produce and instructs to return exactly one JSON object with the keys in writes; reads includes everything the prompt needs. observable=true only for a model state whose output is the deliverable itself (a summary, answer or report the skill hands back).
-  judge: {kind:"judge", prompt, reads, writes:[label_var], labels:[..., "弃权"], abstain:"弃权"}. reads must already exist; writes is one new label variable; include a conservative unconditional default edge.
+  judge: {kind:"judge", prompt, reads, writes:[label_var], labels:[..., "abstain"], abstain:"abstain"}. reads must already exist; writes is one new label variable; include a conservative unconditional default edge.
   user:  {kind:"user", prompt, writes:[answer_var]} only if the skill requires asking the user.
   end:   {kind:"end", terminal:<terminal id>}.
 - transitions: [{if, to, inc?}], evaluated in order; "if" is a condition or "" for the default. Conditions support ==, !=, <, <=, >, >=, and/or/not, empty(x), nonempty(x), string, integer and boolean constants over variables. No arithmetic, attribute access or indexing. inc names one integer counter incremented when the edge is taken. Success of a tool call is exactly the tool's success condition from tools (over its result fields, which must be in writes).
@@ -119,7 +129,7 @@ class InitResult:
 
 
 # --------------------------------------------------------------------------- #
-# 规则抽取（模型触点，原文核对）
+# Rule extraction (model touchpoint, quote verification)
 # --------------------------------------------------------------------------- #
 def _valid_pattern(p: Optional[EventPattern], ctx: CompileContext, labels: set) -> bool:
     if p is None:
@@ -134,7 +144,8 @@ def _valid_pattern(p: Optional[EventPattern], ctx: CompileContext, labels: set) 
 
 
 def extract_rules(ctx: CompileContext, model: Any, *, progress=None) -> tuple[dict, list[str]]:
-    """让模型从文档抽规则；返回 (规则 dict, 说明)。原文核对、模式合法性检查都在这里。"""
+    """Have the model extract rules from the document; returns (rules dict, notes). Quote verification and pattern
+    validity checks both happen here."""
     notes: list[str] = []
     base = {"apply", "probe"} | {s.label for s in ctx.tools.values() if s.label}
     values = {"document": ctx.skill_text, "clauses": {c[0]: c[1][:300] for c in ctx.clauses},
@@ -143,36 +154,38 @@ def extract_rules(ctx: CompileContext, model: Any, *, progress=None) -> tuple[di
               "task_inputs": list(ctx.task_inputs), "base_labels": sorted(base)}
     try:
         raw = model.generate(prompt=RULES_PROMPT, values=values)
+    except ModelUnavailable:
+        raise                                                       # the endpoint failed: do not continue without rules
     except Exception as exc:                                        # noqa: BLE001
-        return {}, [f"规则抽取失败：{type(exc).__name__}: {exc}"]
+        return {}, [f"rule extraction failed: {type(exc).__name__}: {exc}"]
     if not isinstance(raw, dict):
-        return {}, ["规则抽取：回复不是 JSON 对象"]
+        return {}, ["rule extraction: the reply is not a JSON object"]
     parsed = parse_rules(raw, source="document")
     labels = set(base) | {r.label for r in parsed["label_rules"]}
     keep_labels = []
     for r in parsed["label_rules"]:
         if not quote_in_document(r.quote, ctx.skill_text):
-            notes.append(f"标签 {r.label} 的引文不在文档里，丢弃")
+            notes.append(f"label {r.label}: quote not found in the document, discarded")
         elif not _valid_pattern(r.when, ctx, labels):
-            notes.append(f"标签 {r.label} 的模式引用了未知工具或标签，丢弃")
+            notes.append(f"label {r.label}: pattern refers to an unknown tool or label, discarded")
         else:
             keep_labels.append(r)
     labels = set(base) | {r.label for r in keep_labels}
     keep_reqs = []
     for r in parsed["requirements"]:
         if not quote_in_document(r.quote, ctx.skill_text):
-            notes.append(f"要求 {r.id} 的引文不在文档里，丢弃")
+            notes.append(f"requirement {r.id}: quote not found in the document, discarded")
         elif not (_valid_pattern(r.a, ctx, labels) and _valid_pattern(r.b, ctx, labels)):
-            notes.append(f"要求 {r.id} 的模式引用了未知工具或标签，丢弃")
+            notes.append(f"requirement {r.id}: pattern refers to an unknown tool or label, discarded")
         else:
             keep_reqs.append(r)
     keep_tcs = []
     for tc in parsed["terminal_conditions"]:
         pats = list(tc.required_evidence) + list(tc.invalidating_events)
         if not quote_in_document(tc.quote, ctx.skill_text):
-            notes.append(f"终点条件 {tc.terminal} 的引文不在文档里，丢弃")
+            notes.append(f"terminal condition {tc.terminal}: quote not found in the document, discarded")
         elif not all(_valid_pattern(p, ctx, labels) for p in pats):
-            notes.append(f"终点条件 {tc.terminal} 的模式引用了未知工具或标签，丢弃")
+            notes.append(f"terminal condition {tc.terminal}: pattern refers to an unknown tool or label, discarded")
         else:
             keep_tcs.append(tc)
     terminals = parsed["terminals"] or [{"id": "DONE", "kind": "done"}]
@@ -182,8 +195,8 @@ def extract_rules(ctx: CompileContext, model: Any, *, progress=None) -> tuple[di
             terminals.append({"id": tc.terminal, "kind": tc.terminal.lower()})
             ids.add(tc.terminal)
     if progress:
-        progress(f"  规则：{len(terminals)} 个终点，{len(keep_labels)} 条标签，{len(keep_reqs)} 条要求，"
-                 f"{len(keep_tcs)} 条终点条件" + (f"；丢弃 {len(notes)} 条" if notes else ""))
+        progress(f"  rules: {len(terminals)} terminals, {len(keep_labels)} labels, {len(keep_reqs)} requirements, "
+                 f"{len(keep_tcs)} terminal conditions" + (f"; {len(notes)} discarded" if notes else ""))
     return {"terminals": terminals, "label_rules": keep_labels, "requirements": keep_reqs,
             "terminal_conditions": keep_tcs}, notes
 
@@ -204,7 +217,7 @@ def install_rules(ctx: CompileContext, rules: dict) -> None:
 # G_init
 # --------------------------------------------------------------------------- #
 def g_init(machine: Machine, ctx: CompileContext) -> list[str]:
-    """条件语法、结构、条款编号、工具名、任务输入声明、终点表、回退状态。"""
+    """Guard syntax, structure, clause ids, tool names, task input declarations, terminal table, fallback state."""
     errs: list[str] = []
     for sid, st in machine.states.items():
         for t in st.transitions:
@@ -212,35 +225,36 @@ def g_init(machine: Machine, ctx: CompileContext) -> list[str]:
                 try:
                     _cond.parse(t.cond)
                 except _cond.CondError as exc:
-                    errs.append(f"条件: {sid}→{t.to} {t.cond!r}：{exc}")
+                    errs.append(f"guard: {sid}→{t.to} {t.cond!r}: {exc}")
     if errs:
         return errs
-    errs += [f"结构: {f}" for f in _checks.structural_findings(machine)]
+    errs += [f"structure: {f}" for f in _checks.structural_findings(machine)]
     ids = {c[0] for c in ctx.clauses}
     if ids:
         bad = sorted({st.clause for st in machine.states.values() if st.clause and st.clause not in ids})
         if bad:
-            errs.append(f"条款: {bad} 不在条款表里（可用 {sorted(ids)[:8]}…）")
+            errs.append(f"clause: {bad} not in the clause table (available: {sorted(ids)[:8]}…)")
     for sid, st in machine.states.items():
         if st.action.kind == "tool" and st.action.name not in ctx.tools:
-            errs.append(f"工具: {sid} 用了 {st.action.name!r}，只允许 {sorted(ctx.tools)}")
+            errs.append(f"tool: {sid} uses {st.action.name!r}, only {sorted(ctx.tools)} are allowed")
     declared = {v.init_from for v in machine.variables if v.init_from}
     for k, fs in ctx.task_inputs.items():
         if fs.always_present and f"task.input.{k}" not in declared:
-            errs.append(f"变量: 缺少任务输入 task.input.{k} 的变量声明")
+            errs.append(f"variable: missing variable declaration for task input task.input.{k}")
     have = {t.id: t.kind for t in machine.terminals}
     for t in ctx.terminals:
         if t["id"] not in have:
-            errs.append(f"终点: 缺少终点 {t['id']}")
+            errs.append(f"terminal: missing terminal {t['id']}")
     if "fallback" not in have.values():
-        errs.append("终点: 缺少 kind=fallback 的终点")
+        errs.append("terminal: missing a terminal with kind=fallback")
     if machine.fallback not in machine.states:
-        errs.append(f"回退: 没有 {machine.fallback} 状态")
+        errs.append(f"fallback: no {machine.fallback} state")
     return list(dict.fromkeys(errs))
 
 
 def normalize(machine: Machine, ctx: CompileContext) -> list[str]:
-    """更新前的整理：来源标记、输出字段映射、步数上限。就地改，返回处理记录。"""
+    """Normalization before the update: origin marks, output field mappings, step limit. Modifies the machine in
+    place and returns a log of what was done."""
     notes: list[str] = []
     base_labels = {"apply", "probe"} | {s.label for s in ctx.tools.values() if s.label}
     for sid, st in machine.states.items():
@@ -253,27 +267,28 @@ def normalize(machine: Machine, ctx: CompileContext) -> list[str]:
         if a.kind != "tool":
             continue
         spec = ctx.spec(a.name)
-        # 基础标签归 phase（注册表给了固定标签的工具以注册表为准），派生标签归 labels
+        # the base label goes to phase (for tools with a fixed label in the registry, the registry wins), derived labels
+        # go to labels
         labels = list(dict.fromkeys(getattr(a, "labels", []) or []))
         if spec.label and a.phase != spec.label:
             if a.phase:
-                notes.append(f"{sid}: 基础标签 {a.phase!r} 改为注册表给的 {spec.label!r}")
+                notes.append(f"{sid}: base label {a.phase!r} changed to {spec.label!r} from the registry")
             a.phase = spec.label
         if not a.phase:
             base = [l for l in labels if l in base_labels]
             if base:
                 a.phase = base[0]
-                notes.append(f"{sid}: 基础标签 {base[0]!r} 从 labels 移到 phase")
+                notes.append(f"{sid}: base label {base[0]!r} moved from labels to phase")
         a.labels = [l for l in labels if l not in base_labels and l != a.phase]
         known = set(spec.output_keys())
         binds = dict(a.binds or {})
         semantic = [w for w in a.writes if w not in known and w not in binds.values()]
         if semantic and spec.primary and spec.primary not in binds:
             binds[spec.primary] = semantic[0]
-            notes.append(f"{sid}: 输出映射 {spec.primary} → {semantic[0]}")
+            notes.append(f"{sid}: output mapping {spec.primary} → {semantic[0]}")
             semantic = semantic[1:]
         if semantic:
-            notes.append(f"{sid}: {semantic} 没有产出字段可绑，运行时读到空")
+            notes.append(f"{sid}: {semantic} have no output field to bind to and read as empty at run time")
         a.binds = binds
     machine.max_steps = max(int(machine.max_steps or 0), 3 * len(machine.states) + 16)
     return notes
@@ -309,12 +324,12 @@ def _rules_for_prompt(ctx: CompileContext) -> dict:
 
 def initialize(ctx: CompileContext, *, model: Any, rounds: int = 3, lenient: bool = False,
                progress=None) -> InitResult:
-    """M_0 = 首个通过 G_init 的候选；随后清条款、规范化、过更新阶段的检查。"""
+    """M_0 = the first candidate that passes G_init; then clear clauses, normalize, and run the update stage's check."""
     res = InitResult()
     previous, errors = None, []
     for attempt in range(1, max(1, rounds) + 1):
         if progress:
-            progress(f"初始化第 {attempt}/{rounds} 轮")
+            progress(f"initialization round {attempt}/{rounds}")
         values = {"document": ctx.skill_text, "clauses": {c[0]: c[1][:300] for c in ctx.clauses},
                   "skill_id": ctx.skill_id, "tools": _tools_for_prompt(ctx),
                   "task_inputs": {k: {"present_in": v.present_in, "total": v.total}
@@ -330,19 +345,21 @@ def initialize(ctx: CompileContext, *, model: Any, rounds: int = 3, lenient: boo
             raw = model.generate(prompt=PROMPT, values=values)
             data = _unwrap(raw)
             if not isinstance(data, dict):
-                raise ValueError("回复不是 JSON 对象")
+                raise ValueError("the reply is not a JSON object")
             data.setdefault("format", "efsm-v1")
             data["skill_id"] = ctx.skill_id
             data.setdefault("fallback", "FALLBACK")
             machine = Machine.model_validate(data)
             errors = g_init(machine, ctx)
+        except ModelUnavailable:
+            raise                                                 # the endpoint failed: another round cannot help
         except Exception as exc:                                  # noqa: BLE001
-            errors = [f"格式/模式: {type(exc).__name__}: {str(exc)[:600]}"]
+            errors = [f"format: {type(exc).__name__}: {str(exc)[:600]}"]
             machine = None
         res.attempts.append({"attempt": attempt, "errors": list(errors),
                              "n_states": len(machine.states) if machine else 0})
         if progress:
-            progress("  " + ("通过" if not errors else "未通过：" + "；".join(e[:120] for e in errors[:4])))
+            progress("  " + ("passed" if not errors else "failed: " + "; ".join(e[:120] for e in errors[:4])))
         if machine is not None and not errors:
             res.machine = machine
             break

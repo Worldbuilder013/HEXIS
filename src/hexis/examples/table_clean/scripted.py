@@ -1,9 +1,10 @@
-"""table_clean 的密闭脚本：判断桩、FALLBACK 解释脚本、任务生成器，以及一台手写参考机器。
+"""Hermetic scripts for table_clean: the judge stub, the FALLBACK interpretation script, the task generator, and a hand-written reference machine.
 
-这里没有任何随机的不确定：判断用 :func:`~.tools.is_canonical` 给「真值」，错误率由
-:class:`~hexis.llm.model_iface.ScriptedModel` 按种子确定性注入；任务生成吃固定种子。参考
-机器 :func:`reference_machine` 是一台**正确的** table_clean EFSM，用来喂运行器与回放做对照，
-也是「编译出来的机器该长什么样」的标尺。
+Nothing here is randomly nondeterministic: judgments take their "ground truth" from
+:func:`~.tools.is_canonical`, the error rate is injected deterministically from a seed by
+:class:`~hexis.llm.model_iface.ScriptedModel`, and task generation uses a fixed seed. The reference
+machine :func:`reference_machine` is a **correct** table_clean EFSM, fed to the runner and to replay
+for comparison; it is also the yardstick for "what a compiled machine should look like".
 """
 
 from __future__ import annotations
@@ -11,43 +12,53 @@ from __future__ import annotations
 import random
 from typing import Callable, Optional
 
+from hexis.examples.table_clean.tools import is_canonical
 from hexis.llm.model_iface import ScriptedModel
 from hexis.machine.schema import (
-    EndAction, JudgeAction, Machine, Prohibition, State, Terminal,
-    ToolAction, Transition, Variable,
+    ABSTAIN,
+    EndAction,
+    JudgeAction,
+    Machine,
+    Prohibition,
+    State,
+    Terminal,
+    ToolAction,
+    Transition,
+    Variable,
 )
-from hexis.examples.table_clean.tools import is_canonical
 
-JUDGE_Q = "当前 header_row 是否符合 SKILL.md S2.1 的规范判据"
-LABELS = ["规范", "不规范", "弃权"]
+JUDGE_Q = "Is header_row well-formed according to the criterion in SKILL.md S2.1?"
+LABELS = ["well_formed", "malformed", ABSTAIN]
 
 _GOOD_HEADERS = [
-    ["名称", "数量", "日期"],
-    ["商品", "单价", "库存"],
-    ["姓名", "年龄", "城市"],
-    ["订单号", "金额", "状态"],
+    ["name", "quantity", "date"],
+    ["product", "unit_price", "stock"],
+    ["full_name", "age", "city"],
+    ["order_id", "amount", "status"],
 ]
 
 
 # --------------------------------------------------------------------------- #
-# 判断桩与 FALLBACK 解释脚本
+# Judge stub and FALLBACK interpretation script
 # --------------------------------------------------------------------------- #
 def make_judge(abstain_on: Optional[Callable[[dict], bool]] = None):
-    """判断函数：读 ``header_row``，规范/不规范二选一。``abstain_on`` 命中则弃权。"""
+    """Judge function: reads ``header_row`` and picks well_formed or malformed. Abstains when ``abstain_on`` matches."""
 
     def judge(prompt: str, values: dict) -> str:
         if abstain_on and abstain_on(values):
-            return "弃权"
-        return "规范" if is_canonical(values.get("header_row", "")) else "不规范"
+            return ABSTAIN
+        return "well_formed" if is_canonical(values.get("header_row", "")) else "malformed"
 
     return judge
 
 
 def interpret(prompt: str, values: dict, history: tuple = ()) -> dict:
-    """FALLBACK 解释脚本：模型读文档+历史+变量，逐步走完 table_clean。
+    """FALLBACK interpretation script: the model reads document + history + variables and walks table_clean step by step.
 
-    完全由当前变量与历史决定下一动作，因此确定性、可复述。判断（表头规范吗）在这里是
-    模型**内联**做的（解释模式不建独立判断状态），用 :func:`is_canonical` 模拟。
+    The next action is fully determined by the current variables and the history, so it is
+    deterministic and repeatable. The judgment (is the header well-formed) is made **inline** by the
+    model here (interpretation mode builds no separate judge state), simulated with
+    :func:`is_canonical`.
     """
     fixes = sum(1 for r in history
                 if (r.get("action") or {}).get("name") == "fix_header")
@@ -71,19 +82,20 @@ def interpret(prompt: str, values: dict, history: tuple = ()) -> dict:
 
 def build_model(*, error_rate: float = 0.0, seed: int = 0,
                 abstain_on: Optional[Callable[[dict], bool]] = None) -> ScriptedModel:
-    """构造密闭模型桩：judge 走 :func:`make_judge`，generate 走 :func:`interpret`。"""
+    """Build the hermetic model stub: judge goes through :func:`make_judge`, generate through :func:`interpret`."""
     return ScriptedModel(judge=make_judge(abstain_on), gen=interpret,
                          error_rate=error_rate, seed=seed)
 
 
 # --------------------------------------------------------------------------- #
-# 任务生成器
+# Task generator
 # --------------------------------------------------------------------------- #
 def gen_tasks(n: int, *, seed: int = 0, bad_ratio: float = 0.5) -> list[dict]:
-    """产出 n 个任务，混合规范表头（直接导出）与不规范表头（触发 1..3 次修复）。
+    """Produce n tasks, mixing well-formed headers (exported directly) and malformed headers (triggering 1..3 repairs).
 
-    每个任务自带内存文件（``files``），确定性由 ``seed`` 保证。``output_path`` 恒不等于
-    ``path``（走 happy path）；触犯 P1 的任务由测试单独构造。
+    Each task carries its own in-memory files (``files``), and ``seed`` makes generation
+    deterministic. ``output_path`` never equals ``path`` (the happy path); tasks that violate P1 are
+    built separately by the tests.
     """
     rng = random.Random(seed)
     tasks: list[dict] = []
@@ -100,19 +112,19 @@ def gen_tasks(n: int, *, seed: int = 0, bad_ratio: float = 0.5) -> list[dict]:
         tasks.append({
             "task_id": f"t{i}",
             "input": {"path": path, "output_path": out,
-                      "request": "清洗这张表并导出"},
+                      "request": "Clean this table and export it"},
             "files": {path: {"header": header, "rows": rows}},
             "acceptance": {"kind": "script"},
-            "_expected_header": good,   # 供验收比对（下划线前缀＝测试内部用）
+            "_expected_header": good,   # for acceptance comparison (underscore prefix = internal to tests)
         })
     return tasks
 
 
 # --------------------------------------------------------------------------- #
-# 手写参考机器（正确的 table_clean EFSM）
+# Hand-written reference machine (a correct table_clean EFSM)
 # --------------------------------------------------------------------------- #
 def reference_machine() -> Machine:
-    """一台手写的、正确的 table_clean 状态机。读→判→（修⟲）→导出，带 P1。"""
+    """A hand-written, correct table_clean state machine: read -> judge -> (repair loop) -> export, with P1."""
     return Machine(
         skill_id="table-clean",
         initial="s1",
@@ -138,8 +150,8 @@ def reference_machine() -> Machine:
                                            writes=["header_ok"],
                                            labels=list(LABELS)),
                         transitions=[
-                            Transition(cond="header_ok == '规范'", to="s4"),
-                            Transition(cond="header_ok == '不规范' and fix_count < 3",
+                            Transition(cond="header_ok == 'well_formed'", to="s4"),
+                            Transition(cond="header_ok == 'malformed' and fix_count < 3",
                                        to="s3"),
                             Transition(to="FALLBACK"),
                         ]),

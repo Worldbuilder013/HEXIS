@@ -1,12 +1,15 @@
-"""模型与工具的接口，以及一个密闭、可复现的测试桩。
+"""Model and tool interfaces, plus a sealed, reproducible test stub.
 
-运行一台机器只需要两种外部能力：**调工具**（``Tool``，一次纯函数式的副作用）和**问模型**
-（``Model``，判断或生成）。两者都封装成窄接口，好换实现、好在测试里替身。
+Running a machine needs only two external capabilities: **calling tools** (``Tool``, a single functional-style
+side effect) and **asking the model** (``Model``, judge or generate). Both are wrapped in narrow interfaces so
+implementations are easy to swap and to stand in for in tests.
 
-模型有两个触点：``classify`` 给判断动作（在固定标签集里选一个，含弃权），``generate`` 给
-生成型动作与 FALLBACK 解释执行（读一段私有 prompt + 变量，回一个 JSON 对象）。真实实现
-在这两个方法内部拼提示、调 LLM；:class:`ScriptedModel` 则全查表——无网络、同输入同输出，
-错误率按「种子 + 输入指纹」确定性注入，好让判断动作的误差率既能被标定又能复现。
+The model has two touch points: ``classify`` for judge actions (pick one from a fixed label set, abstain
+included) and ``generate`` for generative actions and FALLBACK interpreted execution (read a private prompt +
+variables, reply with one JSON object). Real implementations build the prompt and call the LLM inside these
+two methods; :class:`ScriptedModel` looks everything up in tables -- no network, same input same output, with
+errors injected deterministically from "seed + input fingerprint", so that the error rate of judge actions can
+be both calibrated and reproduced.
 """
 
 from __future__ import annotations
@@ -15,13 +18,19 @@ import hashlib
 import random
 from typing import Any, Callable, Optional, Protocol, runtime_checkable
 
+from hexis.machine.schema import ABSTAIN, LEGACY_ABSTAIN
+
 
 # --------------------------------------------------------------------------- #
-# 工具
+# Tools
 # --------------------------------------------------------------------------- #
+class ModelUnavailable(RuntimeError):
+    """The model endpoint could not be reached or refused the request (as opposed to an unusable answer)."""
+
+
 @runtime_checkable
 class Tool(Protocol):
-    """一次工具调用：``input`` 一个 dict 进，``output`` 一个 dict 出。确定性、无网络。"""
+    """One tool call: a dict ``input`` in, a dict ``output`` out. Deterministic, no network."""
 
     name: str
 
@@ -29,7 +38,7 @@ class Tool(Protocol):
 
 
 class FnTool:
-    """把一个纯函数包成 :class:`Tool`。"""
+    """Wraps a pure function as a :class:`Tool`."""
 
     def __init__(self, name: str, fn: Callable[[dict], dict]):
         self.name = name
@@ -40,7 +49,7 @@ class FnTool:
 
 
 class ToolRegistry:
-    """名字 → 工具。进程内直接调，不进沙箱（玩具环境的工具是自带可信代码）。"""
+    """Name -> tool. Called directly in-process, not in a sandbox (the tools of a toy environment are bundled trusted code)."""
 
     def __init__(self, tools: Optional[dict[str, Tool]] = None):
         self._tools: dict[str, Tool] = dict(tools or {})
@@ -57,43 +66,43 @@ class ToolRegistry:
     def call(self, name: str, inp: dict) -> dict:
         tool = self._tools.get(name)
         if tool is None:
-            raise KeyError(f"没有注册工具 {name!r}")
+            raise KeyError(f"no tool registered as {name!r}")
         return tool.run(inp)
 
 
 # --------------------------------------------------------------------------- #
-# 模型
+# Model
 # --------------------------------------------------------------------------- #
 @runtime_checkable
 class Model(Protocol):
-    """判断与生成两个触点。"""
+    """The two touch points: judge and generate."""
 
     def classify(self, *, prompt: str, values: dict, labels: list[str],
                  examples: tuple = ()) -> str:
-        """在 ``labels`` 里选一个（判断动作）。返回值必属于 labels。"""
+        """Pick one of ``labels`` (judge action). The return value always belongs to labels."""
         ...
 
     def generate(self, *, prompt: str, values: dict, history: tuple = ()) -> dict:
-        """读私有 prompt + 变量（+ FALLBACK 时的历史），回一个 JSON 对象。
+        """Read a private prompt + variables (+ history, for FALLBACK) and reply with one JSON object.
 
-        生成型 ``model`` 动作用不到 ``history``；FALLBACK 逐步解释执行时靠它看「已经做过
-        什么」（例如修了几次表头）。
+        Generative ``model`` actions do not use ``history``; FALLBACK step-by-step interpreted execution relies on
+        it to see "what has already been done" (e.g. how many times the header was fixed).
         """
         ...
 
 
 class ScriptedModel:
-    """密闭测试桩：判断与生成都查表，错误率按种子+指纹确定性注入。
+    """Sealed test stub: both judge and generate are table lookups, with errors injected deterministically from seed + fingerprint.
 
-    * ``judge`` —— ``Callable[[prompt, values], label]`` 或 ``dict[fingerprint, label]``。
-      给出「本该回什么」；错误率再在它之上确定性地翻错。
-    * ``gen`` —— ``Callable[[prompt, values], dict]`` 或 ``dict[fingerprint, dict]``。
-      生成型动作/FALLBACK 一步的回复。
-    * ``error_rate`` + ``seed`` —— 对每次判断，按 ``sha256(seed:指纹)`` 派生一个 [0,1)
-      的数，小于 ``error_rate`` 就把标签翻成同标签集里的另一个**非弃权**标签。同一输入
-      永远同一结果（不推进全局 RNG），所以标定可复现。
+    * ``judge`` -- ``Callable[[prompt, values], label]`` or ``dict[fingerprint, label]``.
+      Gives "what it should answer"; the error rate then deterministically flips it on top of that.
+    * ``gen`` -- ``Callable[[prompt, values], dict]`` or ``dict[fingerprint, dict]``.
+      The reply for a generative action / one FALLBACK step.
+    * ``error_rate`` + ``seed`` -- for each judgment, derive a number in [0,1) from ``sha256(seed:fingerprint)``;
+      if it is below ``error_rate``, flip the label to another **non-abstain** label from the same label set.
+      The same input always gives the same result (the global RNG is not advanced), so calibration is reproducible.
 
-    ``calls`` 记录每次调用的 (kind, prompt, values)，供测试断言调用形状。
+    ``calls`` records each call's (kind, prompt, values) so tests can assert on the call shape.
     """
 
     def __init__(self, *, judge: Any = None, gen: Any = None,
@@ -104,14 +113,14 @@ class ScriptedModel:
         self.seed = int(seed)
         self.calls: list[dict] = []
 
-    # ---- Model 协议 ---- #
+    # ---- Model protocol ---- #
     def classify(self, *, prompt: str, values: dict, labels: list[str],
                  examples: tuple = ()) -> str:
         self.calls.append({"kind": "classify", "prompt": prompt,
                            "values": dict(values)})
         truth = self._lookup_judge(prompt, values, labels)
         if truth not in labels:
-            raise ValueError(f"脚本给的标签 {truth!r} 不在 labels {labels} 里")
+            raise ValueError(f"scripted label {truth!r} is not in labels {labels}")
         if self.error_rate > 0 and self._should_err(prompt, values):
             wrong = [l for l in labels if l != truth and l != _abstain(labels)]
             if wrong:
@@ -127,9 +136,9 @@ class ScriptedModel:
             fp = _fingerprint(prompt, values)
             if fp in self._gen:
                 return dict(self._gen[fp])
-        raise KeyError(f"ScriptedModel.generate 没有脚本覆盖这次调用: {prompt[:60]!r}")
+        raise KeyError(f"ScriptedModel.generate: no script covers this call: {prompt[:60]!r}")
 
-    # ---- 内部 ---- #
+    # ---- internals ---- #
     def _lookup_judge(self, prompt: str, values: dict, labels: list[str]) -> str:
         if callable(self._judge):
             return self._judge(prompt, values)
@@ -137,7 +146,7 @@ class ScriptedModel:
             fp = _fingerprint(prompt, values)
             if fp in self._judge:
                 return self._judge[fp]
-        raise KeyError(f"ScriptedModel.classify 没有脚本覆盖这次判断: {prompt[:60]!r}")
+        raise KeyError(f"ScriptedModel.classify: no script covers this judgment: {prompt[:60]!r}")
 
     def _should_err(self, prompt: str, values: dict) -> bool:
         fp = _fingerprint(prompt, values)
@@ -152,13 +161,13 @@ class ScriptedModel:
 
 
 def _abstain(labels: list[str]) -> str:
-    for cand in ("弃权", "abstain", "unknown"):
+    for cand in (LEGACY_ABSTAIN, ABSTAIN, "unknown"):
         if cand in labels:
             return cand
     return ""
 
 
 def _fingerprint(head: str, values: dict) -> str:
-    """(问题/提示, 变量取值) 的规范化指纹，用于查表与确定性错误注入。"""
+    """Canonical fingerprint of (question/prompt, variable values), used for table lookup and deterministic error injection."""
     items = sorted((str(k), repr(v)) for k, v in values.items())
     return head.strip() + "|" + "|".join(f"{k}={v}" for k, v in items)

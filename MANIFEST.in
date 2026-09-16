@@ -1,3 +1,3 @@
-include CHANGELOG.md
+include CHANGELOG.md CITATION.cff CONTRIBUTING.md SECURITY.md THIRD_PARTY_NOTICES.md .env.example
 graft tests
 global-exclude *.py[cod] __pycache__

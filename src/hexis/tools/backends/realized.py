@@ -1,12 +1,15 @@
-"""模型实现的工具：机器里有、后端没有的工具，用模型把「这次调用」翻成一条 shell 命令去跑。
+"""Model-realized tools: for tools the machine has but the backend does not, the model translates "this call" into one shell command to run.
 
-手写参考机器里的 ``inspect_workbook`` / ``apply_edits`` / ``audit_workbook`` 是假想工具，OpenCode 没有。
-要把这台机器跑起来，就得有人实现它们。:class:`RealizedTools` 把这件事交给模型：拿工具定义（描述、
-参数字段）和这一次的实参，让模型写一条能在工作目录里完成这次操作的 shell 命令，交给后端的 ``bash``
-执行，结果按采集器封装（ok / returncode / stdout / stderr）原样返回。后端本来就有的工具直接透传。
+``inspect_workbook`` / ``apply_edits`` / ``audit_workbook`` in the hand-written reference machine are hypothetical
+tools that OpenCode does not have. To run that machine, someone has to implement them. :class:`RealizedTools`
+hands this to the model: given the tool definition (description, parameter fields) and this call's arguments, the
+model writes one shell command that performs the operation in the working directory; it is executed by the
+backend's ``bash``, and the result is returned as is, in the collector's wrapper (ok / returncode / stdout /
+stderr). Tools the backend already has are passed straight through.
 
-这不是把假想工具「换成」bash：机器看到的仍是它自己的工具名和参数，只是执行方式是模型现场实现。
-每次实现都是一次模型调用，记在同一个模型适配器的账上；命令原文写进结果的 ``realized_command``。
+This does not "replace" the hypothetical tool with bash: the machine still sees its own tool name and arguments;
+only the way it is executed is implemented by the model on the spot. Each realization is one model call, counted
+on the same model adapter's account; the command text is written to ``realized_command`` in the result.
 """
 from __future__ import annotations
 
@@ -26,7 +29,7 @@ Return exactly one JSON object {{"command": "<the shell command>"}}."""
 
 
 class RealizedTools:
-    """后端 + 模型 → 能执行机器里全部工具名的后端。``call(name, args) -> dict``。"""
+    """Backend + model -> a backend that can execute every tool name in the machine. ``call(name, args) -> dict``."""
 
     def __init__(self, native: Any, specs: Mapping[str, ToolSpec], model: Any, *,
                  shell_tool: str = "bash", shell_key: str = "command") -> None:
@@ -75,7 +78,7 @@ class RealizedTools:
         self.calls.append({"name": name, "input": inp, "realized": True, "command": cmd[:400]})
         return out
 
-    # 让 with 语句直接套在原后端上
+    # let a with statement wrap the underlying backend directly
     def __enter__(self) -> "RealizedTools":
         if hasattr(self.native, "__enter__"):
             self.native.__enter__()

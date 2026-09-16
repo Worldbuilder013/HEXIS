@@ -1,71 +1,91 @@
-"""动作规范化：把一条轨迹记录（或一台机器的动作）折成可比较的 **KEY**。
+"""Action normalization: fold a trace record (or a machine action) into a comparable **KEY**.
 
-这是整套编译里最不起眼、也最容易悄悄错的一块。两处关键判断都建在它上面：
+This is the least conspicuous part of the whole compilation, and the easiest one to get quietly
+wrong. Two key decisions are built on top of it:
 
-* **编译**要判「这一步和那一步是不是同一步」——同 ⇒ 接回旧状态（成环、合并 ≈-等价的历史，
-  Myhill-Nerode 的状态最小性靠它），异 ⇒ 开一个新状态。折过头，两条语义不同的分岔被并成
-  一个状态；折不够，每一步都独一无二，机器退化成一条没有环的直线。
-* **回放**要判「机器挑的这一步，是不是轨迹实际走的那一步」。折过头会误判复述成功；折不够
-  会让任何机器都复述不了任何轨迹。
+* **Compilation** has to decide "is this step the same step as that one" -- same => reconnect to
+  the old state (forming loops, merging ≈-equivalent histories; Myhill-Nerode state minimality
+  depends on it), different => open a new state. Fold too much, and two semantically different
+  branches are merged into one state; fold too little, and every step is unique, so the machine
+  degenerates into a straight line with no loops.
+* **Replay** has to decide "is the step the machine picked the step the trace actually took".
+  Folding too much wrongly reports a successful reproduction; folding too little makes every
+  machine unable to reproduce any trace.
 
-仓库里本来就有两份实现，而且它们**故意不一样**：
+The repository already had two implementations, and they are **deliberately different**:
 
-* :func:`hexis.legacy.compiler._sig`（严）——工具只按名字并，但判断动作要比 ``prompt``、终止
-  动作要比 ``terminal``。编译期必须这么严：两个提问不同的判断是两个不同的语义分岔，并掉就
-  等于把「表头规不规范」和「金额对不对」当成同一步。
-* :func:`hexis.legacy.replay._action_matches`（松）——只比 ``kind``，工具再加名字。回放期必须
-  这么松：轨迹里的动作参数是**具体值**（渲染过的 prompt、填好的 input），机器里的是**模板**
-  （``${var}``），逐字比一定不等；而 prompt 里带着题面，把它计进 KEY 会让每一步都独一无二。
+* :func:`hexis.legacy.compiler._sig` (strict) -- tools are merged by name only, but judge actions
+  also compare ``prompt`` and end actions compare ``terminal``. Compilation must be this strict:
+  two judges asking different questions are two different semantic branches, and merging them
+  would treat "is the header canonical" and "are the amounts right" as the same step.
+* :func:`hexis.legacy.replay._action_matches` (loose) -- compares only ``kind``, plus the name
+  for tools. Replay must be this loose: action arguments in a trace are **concrete values**
+  (rendered prompt, filled-in input), while in the machine they are **templates** (``${var}``),
+  so a literal comparison never matches; and the prompt carries the problem statement, so
+  putting it into the KEY would make every step unique.
 
-所以这里**不统一它们**，而是把两套并成一个函数的两个具名档位：``strict=True`` 对应编译侧，
-``strict=False``（默认）对应回放侧。谁该用哪档是语义问题，不是实现细节，因此写在签名里。
+So this module does **not unify them**; instead it folds both into two named modes of one
+function: ``strict=True`` is the compilation side, ``strict=False`` (the default) is the replay
+side. Which mode to use is a semantic question, not an implementation detail, hence it is in the
+signature.
 
-规则（``kind`` 恒参与）：
+Rules (``kind`` always participates):
 
 ===========  ==========================================  ==============================
-kind         loose（回放侧）                              strict（编译侧，额外再加）
+kind         loose (replay side)                         strict (compile side, adds)
 ===========  ==========================================  ==============================
-``tool``     kind + 规范化后的工具名                       同左（工具不因参数分裂）
+``tool``     kind + normalized tool name                 same (tools don't split on args)
 ``judge``    kind + writes                               + ``prompt``
 ``model``    kind + writes                               + ``prompt``
 ``user``     kind + writes                               + ``prompt``
-``end``      kind + ``terminal``                          同左（两档都比 terminal）
+``end``      kind + ``terminal``                         same (both modes compare terminal)
 ===========  ==========================================  ==============================
 
-两档与既有两份实现的差：loose 比 ``_action_matches`` **略细**——多比了 ``end`` 的 terminal
-与 judge/model 的 writes。这是有意的：``end`` 的 terminal 是「以哪种方式结束」，把 ok 与
-give_up 并成一步会让拒绝集排除失效；而 writes 是「这一步往哪个变量写」，它决定后续条件读得
-到什么，属于状态身份而非参数。在真实轨迹上（一个 end 状态一种 terminal、一个提问写一个变量）
-两者的**分组完全一致**——test_14 拿 table_clean 的记录表逐对交叉验证了这一点，好让日后把
-replay 指过来不改变行为。strict 同理比 ``_sig`` 略细（judge/model 多比 writes）。
+How the two modes differ from the two existing implementations: loose is **slightly finer** than
+``_action_matches`` -- it additionally compares the terminal of ``end`` and the writes of
+judge/model. This is intentional: an ``end``'s terminal is "which way the run ended", and merging
+ok with give_up into one step breaks the rejection-set exclusion; writes is "which variable this
+step writes to", which determines what later conditions can read, so it belongs to state identity
+rather than to arguments. On real traces (one terminal per end state, one variable per question)
+the two produce **exactly the same grouping** -- test_14 cross-checks this pair by pair on the
+table_clean records, so that pointing replay here later does not change behaviour. Likewise,
+strict is slightly finer than ``_sig`` (judge/model additionally compare writes).
 
-``canon_action`` 同时吃 :class:`~hexis.machine.schema.Record`（``.action`` 是**裸 dict**）和
-schema 的 Action 模型（ToolAction/ModelAction/JudgeAction/UserAction/EndAction）——编译器手上
-是模型、轨迹里是 dict，同一步必须折出同一个 KEY，否则两侧一比就全错。识别走鸭子类型，**不
-import** :mod:`hexis.machine.schema`：本模块因此零依赖、无环，任何一侧都能自由 import。
+``canon_action`` accepts both :class:`~hexis.machine.schema.Record` (whose ``.action`` is a **bare
+dict**) and the schema's Action models (ToolAction/ModelAction/JudgeAction/UserAction/EndAction)
+-- the compiler holds models, traces hold dicts, and the same step must fold into the same KEY,
+otherwise every comparison between the two sides is wrong. Recognition is duck-typed and **does
+not import** :mod:`hexis.machine.schema`: this module therefore has no dependencies and no import
+cycles, so either side can import it freely.
 
-⚠️ 一个坑：judge/model 的 ``writes`` 在轨迹记录里**没有**单独字段（见 runtime._run_action：
-judge 记的是 ``{kind,prompt,reads}``、model 记的是
-``{kind,template_id,prompt,reads,prompt_sha256}``），只能从 ``Record.output``
-的键反推（judge 的 output 就是 ``{写入变量: 标签}``，其余动作去掉 ``ok``/``error`` 这类状态
-键——与 compiler._infer_writes 同一套约定）。所以**要传整条 Record，别只传 ``rec.action``**：
-裸 action dict 拿不到 output，judge 的 writes 会退化成空（此时 strict 恰好退回 ``_sig`` 的
-行为，不会更错，但也不会更准）。
+⚠️ A pitfall: the ``writes`` of judge/model have **no** dedicated field in trace records (see
+runtime._run_action: a judge records ``{kind,prompt,reads}``, a model records
+``{kind,template_id,prompt,reads,prompt_sha256}``), so they can only be inferred from the keys of
+``Record.output`` (a judge's output is exactly ``{written variable: label}``; for other actions,
+status keys such as ``ok``/``error`` are removed -- the same convention as
+compiler._infer_writes). So **pass the whole Record, not just ``rec.action``**: a bare action
+dict has no output, and the judge's writes degrade to empty (strict then happens to fall back to
+the behaviour of ``_sig`` -- no worse, but no more precise either).
 
-同源性：judge 的 ``prompt`` 轨迹里有，所以 tool/judge/end 的**严档**跨源（记录 × 机器动作）
-照样对得上。``model`` 从 runtime 那一轮起也进了这一档：``runtime._model_action`` 把**模板原文**
-（不是渲染后的全文）记进 ``rec.action["prompt"]``，所以 runtime 产出的 model 记录与机器的
-``ModelAction`` 严档也对得上。但这只对**记了 prompt 的**记录成立——``user`` 动作至今只记
-``{kind}``（runtime 拒绝执行 user 动作），旧轨迹与外部轨迹也可能没这个字段；这类记录的严档
-退化成 ``("model"/"user", "writes=…")``，与机器动作必然不等。跨源比较拿不准就用松档——回放正是
-这么做的。test_14 把这条边界钉死了，免得日后当成偶然。
+Same-source comparability: a judge's ``prompt`` is present in traces, so the **strict mode** of
+tool/judge/end still matches across sources (record x machine action). ``model`` joined this group
+as of that runtime revision: ``runtime._model_action`` records the **raw template** (not the
+rendered text) into ``rec.action["prompt"]``, so model records produced by the runtime also match
+the machine's ``ModelAction`` in strict mode. But this only holds for records **that recorded a
+prompt** -- ``user`` actions still record only ``{kind}`` (the runtime refuses to execute user
+actions), and old or external traces may lack the field too; the strict key of such records
+degrades to ``("model"/"user", "writes=…")``, which can never equal a machine action. When unsure
+in a cross-source comparison, use the loose mode -- which is exactly what replay does. test_14 pins
+this boundary so that it is not mistaken for an accident later.
 
-KEY 是 ``tuple[str, ...]``：可哈希、可 ``json.dumps``、跨进程稳定——不用 :func:`hash`、不用
-:func:`id`、不吃 dict 的插入顺序（该排的都排过）。
+The KEY is ``tuple[str, ...]``: hashable, ``json.dumps``-able, stable across processes -- no
+:func:`hash`, no :func:`id`, no dependence on dict insertion order (everything that needs sorting
+is sorted).
 
-**这里不做 LaTeX / 答案的规范化**（``\\frac12`` 与 ``\\frac{1}{2}`` 是否同一个答案）。那件事
-要 sympy，住在 ``grader.py``，是**结果**的等价而不是**动作**的等价。本模块只用标准库，好让
-结构检查、编译器、回放随便 import 而不背上重依赖。
+**No LaTeX / answer normalization here** (whether ``\\frac12`` and ``\\frac{1}{2}`` are the same
+answer). That needs sympy and is equivalence of **results**, not of **actions**. This module uses
+only the standard library, so that structural checks, the compiler and replay can import it
+freely without taking on heavy dependencies.
 """
 
 from __future__ import annotations
@@ -78,54 +98,60 @@ __all__ = [
     "canon_tool_name", "same_action",
 ]
 
-#: 工具产出里表「这次调用成不成」的保留键：它们是状态位，不是写入变量。
-#: 与 compiler._infer_writes 的 ``k != "ok"`` 同一套约定，这里连 ``error`` 一并排除。
+#: Reserved keys in a tool output that say "did this call succeed": they are status bits, not
+#: written variables. Same convention as ``k != "ok"`` in compiler._infer_writes; ``error`` is
+#: excluded here as well.
 STATUS_KEYS = frozenset({"ok", "error"})
 
-#: 保留的**开局工具**名：编译时给每条轨迹虚拟地垫在最前面的那一步（``kind="tool"``、
-#: 无入参、无产出），运行时是空操作。它让一台机器永远只有一个起点（``initial`` 恒为这个
-#: 状态），真实的第一步变成它之后的普通分岔——math-skill 那 54 条 T+ 里 10 条开局动作不同
-#: 导致的 ``start_mismatch`` 由此归零。名字必须是 :func:`canon_tool_name` 的不动点（下划线
-#: 开头结尾会被削掉，所以不叫 ``__begin__``），且不可能与技能自己的工具撞名。
+#: Reserved **begin tool** name: the step that compilation virtually prepends to every trace
+#: (``kind="tool"``, no input, no output); a no-op at run time. It gives a machine exactly one
+#: starting point (``initial`` is always this state), and the real first step becomes an ordinary
+#: branch after it -- on a math skill, the ``start_mismatch`` caused by 10 of 54 accepted traces
+#: (T+) having a different first action drops to zero this way. The name must be a fixed point of
+#: :func:`canon_tool_name` (leading and trailing underscores are stripped, so it is not called
+#: ``__begin__``) and must never collide with a skill's own tools.
 BEGIN_TOOL = "skill2fsm_begin"
 
-#: 工具名里当作分隔符的字符：连字符与各种空白。
+#: Characters treated as separators in tool names: hyphens and any whitespace.
 _SEP_RE = re.compile(r"[-\s]+")
 _UNDERSCORE_RE = re.compile(r"_+")
 
-#: 带 writes（+ 严格档才带自然语言字段）的动作类型 → 严格档要额外比的那个字段名。
+#: Action kinds that carry writes (+ a natural-language field in strict mode only) -> the name of
+#: the field strict mode additionally compares.
 _TEXT_FIELD = {"judge": "prompt", "model": "prompt", "user": "prompt"}
 
 
 # --------------------------------------------------------------------------- #
-# 工具名
+# Tool names
 # --------------------------------------------------------------------------- #
 def canon_tool_name(name: str) -> str:
-    """把一个工具名折成规范形：去目录、去 ``.py``、小写、``-``/空白 → ``_``。
+    """Fold a tool name into its canonical form: drop directories and ``.py``, lower-case, ``-``/whitespace -> ``_``.
 
-    ``scripts/math_verify.py``、``math-verify``、``MATH_VERIFY`` 折成同一个 ``math_verify``。
-    这不是洁癖：同一个脚本在文档里写路径、在轨迹里写裸名、在模型嘴里写连字符，是常态；不折
-    到一起，一个 s3（校验）状态就会裂成三个互不成环的状态，编译出来的机器直接废掉。
+    ``scripts/math_verify.py``, ``math-verify`` and ``MATH_VERIFY`` all fold into ``math_verify``.
+    This is not pedantry: the same script written as a path in the docs, as a bare name in a
+    trace, and with hyphens by the model is the normal case; without folding them together, one
+    s3 (check) state splits into three states that never form a loop, and the compiled machine
+    is useless.
 
-    连续的 ``_`` 折成一个、首尾的 ``_`` 去掉（``math - verify`` 与 ``math__verify`` 同样收敛
-    到 ``math_verify``）。空名返回空串。
+    Runs of ``_`` collapse into one, leading/trailing ``_`` are removed (``math - verify`` and
+    ``math__verify`` likewise converge to ``math_verify``). An empty name returns an empty string.
     """
     s = str(name or "").strip()
     if not s:
         return ""
-    s = s.replace("\\", "/").rsplit("/", 1)[-1]     # 只留最后一段（去掉目录部分）
+    s = s.replace("\\", "/").rsplit("/", 1)[-1]     # keep only the last segment (drop directories)
     s = s.lower()
-    if s.endswith(".py"):                           # 已小写，所以 .PY 也在这里被削掉
+    if s.endswith(".py"):                           # already lower-cased, so .PY is stripped here too
         s = s[:-3]
     s = _SEP_RE.sub("_", s)
     return _UNDERSCORE_RE.sub("_", s).strip("_")
 
 
 # --------------------------------------------------------------------------- #
-# 拆包：Record / 裸 record dict / 裸 action dict / Action 模型 → (action映射, output映射)
+# Unpacking: Record / bare record dict / bare action dict / Action model -> (action mapping, output mapping)
 # --------------------------------------------------------------------------- #
 def _model_fields(act: Any) -> dict:
-    """从一个 Action 模型上取出参与 KEY 的那几个字段（鸭子类型，不 import schema）。"""
+    """Take the fields that participate in the KEY from an Action model (duck-typed, no schema import)."""
     d: dict = {"kind": getattr(act, "kind", "")}
     for f in ("name", "terminal", "prompt", "prompt", "phase"):
         v = getattr(act, f, None)
@@ -138,70 +164,77 @@ def _model_fields(act: Any) -> dict:
 
 
 def _unwrap(obj: Any) -> tuple[Mapping, Mapping]:
-    """归一成 ``(动作映射, 产出映射)``。产出只有在能拿到整条记录时才非空。"""
-    act = getattr(obj, "action", None)                       # Record（pydantic 模型）
+    """Normalize into ``(action mapping, output mapping)``. The output is non-empty only when a whole record is available."""
+    act = getattr(obj, "action", None)                       # Record (pydantic model)
     if isinstance(act, Mapping):
         out = getattr(obj, "output", None)
         return act, out if isinstance(out, Mapping) else {}
     if isinstance(obj, Mapping):
         inner = obj.get("action")
-        if isinstance(inner, Mapping):                       # JSONL 直接读出来的裸记录
+        if isinstance(inner, Mapping):                       # bare record read straight from JSONL
             out = obj.get("output")
             return inner, out if isinstance(out, Mapping) else {}
-        return obj, {}                                       # 裸 action dict：没有 output
-    if getattr(obj, "kind", None) is not None:               # schema 的 Action 模型
+        return obj, {}                                       # bare action dict: no output
+    if getattr(obj, "kind", None) is not None:               # schema Action model
         return _model_fields(obj), {}
-    raise TypeError(f"不认的动作载体 {type(obj).__name__}（要 Record / dict / Action 模型）")
+    raise TypeError(f"unrecognized action carrier {type(obj).__name__} (expected Record / dict / Action model)")
 
 
 # --------------------------------------------------------------------------- #
-# writes：状态身份的一半（这一步往哪些变量写）
+# writes: half of the state identity (which variables this step writes to)
 # --------------------------------------------------------------------------- #
 def _writes_of(act: Mapping, out: Mapping) -> list[str]:
-    """声明了就用声明的；没声明（轨迹记录的常态）就从 output 的键反推。已排序去重。"""
+    """Use the declared writes if present; otherwise (the usual case for trace records) infer them from the output keys. Sorted and deduplicated."""
     declared = act.get("writes")
     if isinstance(declared, (list, tuple)):
         return sorted({str(w) for w in declared})
     kind = str(act.get("kind") or "")
     keys = {str(k) for k in out}
-    if kind != "judge":                     # judge 的 output 就是 {写入变量: 标签}，全留
+    if kind != "judge":                     # a judge's output is exactly {written variable: label}; keep all
         keys -= STATUS_KEYS
     return sorted(keys)
 
 
 def action_writes(rec_or_action: Any) -> list[str]:
-    """这一步写入的变量名（排序去重）。传 Record 才能从 output 反推出未声明的 writes。"""
+    """Names of the variables this step writes (sorted, deduplicated). Pass a Record to infer undeclared writes from its output."""
     act, out = _unwrap(rec_or_action)
     return _writes_of(act, out)
 
 
 # --------------------------------------------------------------------------- #
-# 动作 KEY
+# Action KEY
 # --------------------------------------------------------------------------- #
 def canon_action(rec_or_action: Any, *, strict: bool = False) -> tuple[str, ...]:
-    """把一步动作折成 KEY。``strict=False`` 为回放档、``True`` 为编译档（差异见模块文档）。
+    """Fold one action into a KEY. ``strict=False`` is the replay mode, ``True`` the compile mode (differences in the module docs).
 
-    返回全是 ``str`` 的元组：可哈希、可 JSON、跨进程稳定。不认的 kind 只回 ``(kind,)``——与
-    compiler._sig 的兜底一致，不臆造结构。
+    Returns a tuple of ``str`` only: hashable, JSON-serializable, stable across processes. An
+    unknown kind returns just ``(kind,)`` -- consistent with the fallback in compiler._sig; no
+    structure is invented.
     """
     act, out = _unwrap(rec_or_action)
     kind = str(act.get("kind") or "")
     if kind == "tool":
-        # 工具不因参数分裂：参数活在变量里，不属于状态身份。两档同一行为。
-        # 唯一的例外是**已记下的阶段**（act["phase"]）：``bash``/``run_python`` 这种通用工具
-        # 名字一样、用途不同，不细化就折成一个状态。阶段由 hexis.traces.phases 的纯函数在采集时
-        # 判出，机器状态那侧也带同一个字段——**两侧对称**，所以它可以进共用的等价关系，
-        # 与只在编译侧生效的 ``pred=``（往回看的语境）不同。没有阶段的动作行为完全照旧。
+        # Tools don't split on arguments: arguments live in variables and are not part of the
+        # state identity. Same behaviour in both modes.
+        # The only exception is the **recorded phase** (act["phase"]): generic tools like
+        # ``bash``/``run_python`` share a name but serve different purposes, and without refinement
+        # they fold into one state. The phase is determined at collection time by the pure
+        # functions in hexis.traces.phases, and machine states carry the same field -- **both sides
+        # are symmetric**, so it can enter the shared equivalence relation, unlike ``pred=``
+        # (backward-looking context), which only applies on the compile side. Actions without a
+        # phase behave exactly as before.
         key = ("tool", "name=" + canon_tool_name(act.get("name") or ""))
         ph = str(act.get("phase") or "")
         return key + (("phase=" + ph,) if ph else ())
     if kind == "end":
-        # terminal 是「以哪种方式结束」，两档都比：并掉它，拒绝集的排除检查会失效。
+        # terminal is "which way the run ended"; both modes compare it: merging it breaks the
+        # rejection-set exclusion check.
         return ("end", "terminal=" + str(act.get("terminal") or "done"))
     if kind in _TEXT_FIELD:
         key = [kind, "writes=" + ",".join(_writes_of(act, out))]
         if strict:
-            # 只有编译档带自然语言字段：prompt 里有题面，进了 KEY 每一步都独一无二。
+            # Only the compile mode includes the natural-language field: the prompt carries the
+            # problem statement, and with it in the KEY every step is unique.
             field = _TEXT_FIELD[kind]
             key.append(f"{field}=" + str(act.get(field) or ""))
         return tuple(key)
@@ -209,7 +242,7 @@ def canon_action(rec_or_action: Any, *, strict: bool = False) -> tuple[str, ...]
 
 
 def is_begin(rec_or_action: Any) -> bool:
-    """这一步是不是保留的开局工具 :data:`BEGIN_TOOL`。"""
+    """Whether this step is the reserved begin tool :data:`BEGIN_TOOL`."""
     act, _out = _unwrap(rec_or_action)
     return (str(act.get("kind") or "") == "tool"
             and canon_tool_name(act.get("name") or "") == BEGIN_TOOL)
@@ -217,16 +250,19 @@ def is_begin(rec_or_action: Any) -> bool:
 
 def context_key(rec_or_action: Any, preds: Sequence[Any] = (), *,
                 k: int = 1) -> tuple[str, ...]:
-    """严格档 KEY + 至多 ``k`` 个**前驱**的松档 KEY——编译侧的状态身份，只用于候选查找。
+    """Strict KEY + the loose KEYs of at most ``k`` **predecessors** -- the compile-side state identity, used only for candidate lookup.
 
-    规则：**身份可以往回看，不能往前看。** 同一个动作在不同前驱语境下可以是不同的状态
-    （Myhill-Nerode：这两段历史其实不等价——math-skill 里所有 ``math_verify`` 调用折成一个
-    状态、4 个后继分不开，就是 ``k=0`` 的后果）；但按后继分需要预知未来，那是条件与判断的
-    活，不是身份的活。
+    Rule: **identity may look backward, never forward.** The same action under different
+    predecessor contexts can be different states (Myhill-Nerode: those two histories are in fact
+    not equivalent -- on a math skill, folding every ``math_verify`` call into one state with 4
+    successors that cannot be told apart is exactly what ``k=0`` produces); but splitting by
+    successors would require knowing the future, which is the job of conditions and judges, not
+    of identity.
 
-    回放**不看**这个 KEY：:func:`hexis.legacy.replay._action_matches` 只比动作（松档），克隆
-    状态的动作是深拷贝，所以身份细化对回放透明——test_08 的分裂早已证明这一点。
-    ``k=0`` 就退化成 ``canon_action(strict=True)``。
+    Replay **does not look** at this KEY: :func:`hexis.legacy.replay._action_matches` only compares
+    actions (loose mode), and a cloned state's action is a deep copy, so identity refinement is
+    transparent to replay -- the splitting in test_08 has already shown this.
+    ``k=0`` degenerates to ``canon_action(strict=True)``.
     """
     base = canon_action(rec_or_action, strict=True)
     if k <= 0 or not preds:
@@ -237,20 +273,21 @@ def context_key(rec_or_action: Any, preds: Sequence[Any] = (), *,
 
 
 def same_action(a: Any, b: Any, *, strict: bool = False) -> bool:
-    """两步动作在给定档位下是不是「同一步」。两侧可以一边是 Record、一边是 Action 模型。"""
+    """Whether two actions are "the same step" in the given mode. One side may be a Record and the other an Action model."""
     return canon_action(a, strict=strict) == canon_action(b, strict=strict)
 
 
 # --------------------------------------------------------------------------- #
-# 产出裁剪
+# Output trimming
 # --------------------------------------------------------------------------- #
 def canon_output(out: Mapping, writes: Sequence[str]) -> dict:
-    """按 ``writes`` 白名单裁剪一次产出：没声明的键一律丢掉，声明了又确实有的留下。
+    """Trim one output by the ``writes`` allow-list: undeclared keys are dropped, declared keys that are present are kept.
 
-    「出参按 writes 白名单收」是运行时的既定纪律（runtime.rebuild）；这里做的是同一件事的
-    **离线**版本，用来在比较两次产出前先去掉 ``ok`` 这类噪声。键按名字排序装回，因此
-    ``json.dumps`` 的结果与两个 dict 当初的插入顺序无关。``writes`` 为空 ⇒ 返回空 dict
-    （什么都没声明，就什么都不收）。
+    "Collect outputs by the writes allow-list" is established runtime discipline
+    (runtime.rebuild); this is the **offline** version of the same thing, used to remove noise such
+    as ``ok`` before comparing two outputs. Keys are put back sorted by name, so the result of
+    ``json.dumps`` is independent of the original insertion order of the two dicts. Empty
+    ``writes`` => an empty dict (nothing declared, nothing collected).
     """
     src = out or {}
     return {k: src[k] for k in sorted({str(w) for w in (writes or ())}) if k in src}

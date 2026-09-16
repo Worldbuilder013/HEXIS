@@ -1,7 +1,9 @@
-"""逐步增量编译的展示层：给判定者（agent）看的步摘要、候选描述与提案渲染。
+"""Presentation layer of stepwise incremental compilation: step summaries, candidate descriptions and proposal
+rendering for the judge (an agent).
 
-放在 ``hexis/compiler/`` 之外：这里为了让人读得快，会识别命令里的工作簿读写、重算、目录列举等特征，
-带有工具名与领域词；编译器核心（``hexis/compiler/``）不得含这些词（test_46 钉住这一点）。
+Kept outside ``hexis/compiler/``: to be quick to read, it recognizes features such as workbook reads and writes,
+recalculation and directory listings in commands, so it contains tool names and domain words; the compiler core
+(``hexis/compiler/``) must not contain these words (test_46 pins this down).
 """
 from __future__ import annotations
 
@@ -10,9 +12,9 @@ import re
 from typing import Any, Optional
 
 from hexis.compiler.align import NEW
+from hexis.compiler.context import CompileContext
 from hexis.compiler.stepwise import candidates, fingerprint, propose
 from hexis.compiler.traces import Event, Prepared, end_state_for
-from hexis.compiler.context import CompileContext
 from hexis.machine.schema import Machine
 
 
@@ -22,7 +24,8 @@ def _short(s: Any, n: int) -> str:
 
 
 def summarize_command(cmd: str) -> str:
-    """一条 shell 命令的特征：读了什么簿（公式视图/缓存视图）、存到哪、是否对比、是否设重算。"""
+    """Features of one shell command: which workbook it loads (formula view / cached view), where it saves, whether it
+    compares, whether it sets recalculation."""
     c = cmd or ""
     flags: list[str] = []
     for arg in re.findall(r"load_workbook\(([^)]*)\)", c):
@@ -92,7 +95,8 @@ def describe_state(m: Machine, sid: str) -> str:
 
 
 def show_trace(m: Machine, ctx: CompileContext, prep: Prepared, *, allow_tier2: bool = True) -> dict:
-    """沿提案链算每一步的候选与提案。判定者改了某一步，后面几步的候选会随之变化——apply 时按实际判定重算。"""
+    """Compute the candidates and the proposal of every step along the proposal chain. When the judge changes a step,
+    the candidates of later steps change with it; apply recomputes them from the actual decisions."""
     term = end_state_for(m, prep.tau)
     out: dict = {"trace": prep.trace_id, "verdict": prep.verdict, "tau": prep.tau, "term": term,
                  "request": _short(prep.task_input.get("request", ""), 220), "fingerprint": fingerprint(m), "steps": []}
@@ -130,7 +134,7 @@ def render_show(m: Machine, shown: dict) -> str:
         elif e["kind"] == "model":
             lines.append(f" [{s['i']:>2}] model:{e['role']} {e['text']!r}")
         elif e["kind"] == "end":
-            lines.append(f" [{s['i']:>2}] end  (声明 {e['terminal'] or '-'}, τ*={shown['tau']})")
+            lines.append(f" [{s['i']:>2}] end  (claimed {e['terminal'] or '-'}, τ*={shown['tau']})")
         else:
             lines.append(f" [{s['i']:>2}] {e['kind']} {e.get('text', '')!r}")
         if e["kind"] != "end":
@@ -138,7 +142,7 @@ def render_show(m: Machine, shown: dict) -> str:
             t2 = ", ".join(x for x in s["tier2"]) or "—"
             p = s["propose"]
             lines.append(f"        cand T1: {t1}" + (f"   | T2: {t2}" if s["tier2"] else "")
-                         + f"    ⇒ 提案 {p['d']}{' ' + p['state'] if p.get('state') else ''}")
+                         + f"    ⇒ proposal {p['d']}{' ' + p['state'] if p.get('state') else ''}")
     return "\n".join(lines)
 
 

@@ -1,10 +1,12 @@
-"""公共定义：变量需求、保证写出、三值护卫判定、零宽路径、模式的静态匹配。
+"""Shared definitions: variable needs, guaranteed writes, three-valued guard evaluation, zero-width paths, static
+pattern matching.
 
-对应算法文档第 1 节的记号：状态动作的读集 R_q、写集 W_q、参数模板 P_q、输出映射 β_q，
-Q_obs（可观察状态：工具、结束、用户、可观察的模型状态）和 p ⇝_b q（只经零宽状态相连）。
+Notation: the read set R_q, write set W_q, parameter template P_q and output mapping β_q of a state action; Q_obs
+(observable states: tool, end, user and observable model states); and p ⇝_b q (connected through zero-width states
+only).
 
-这里没有任何工具名、字段名或技能名。工具的成功判据、产出字段来自
-:class:`~hexis.tools.toolspec.ToolSpec`；模式来自 :mod:`.context`。
+There are no tool names, field names or skill names here. Tool success conditions and output fields come from
+:class:`~hexis.tools.toolspec.ToolSpec`; patterns come from :mod:`.context`.
 """
 from __future__ import annotations
 
@@ -14,12 +16,11 @@ import re
 from collections import deque
 from typing import Any, Mapping, Optional
 
-from hexis.machine import cond as _cond
-from hexis.machine.schema import Machine, State, Transition
-from hexis.tools.toolspec import ToolSpec
 from hexis.compiler.context import CompileContext, EventPattern
+from hexis.machine import cond as _cond
+from hexis.machine.schema import ABSTAIN, Machine, State, Transition
+from hexis.tools.toolspec import ToolSpec
 
-ABSTAIN = "弃权"
 INF = 10 ** 9
 
 _VAR = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
@@ -27,10 +28,10 @@ _COUNTER_EXIT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*>=\s*(\d+)\s*$")
 
 
 # --------------------------------------------------------------------------- #
-# 变量
+# Variables
 # --------------------------------------------------------------------------- #
 def template_vars(inp: Any) -> list[str]:
-    """参数模板引用的变量 Vars(P_q)。"""
+    """Variables referenced by a parameter template, Vars(P_q)."""
     out: list[str] = []
 
     def walk(v: Any) -> None:
@@ -48,7 +49,7 @@ def template_vars(inp: Any) -> list[str]:
 
 
 def need(st: State) -> frozenset:
-    """Need(q) = R_q ∪ Vars(P_q)。同时读写的变量仍保留读取需求。"""
+    """Need(q) = R_q ∪ Vars(P_q). A variable that is both read and written still counts as a read need."""
     a = st.action
     out = set(getattr(a, "reads", []) or [])
     if a.kind == "tool":
@@ -63,7 +64,8 @@ def spec_of(ctx: CompileContext, st: State) -> Optional[ToolSpec]:
 
 
 def guaranteed(st: State, ctx: CompileContext) -> frozenset:
-    """G_q：动作保证写出的变量。工具按定义的保证字段加输出映射；模型、判断、用户按写入声明。"""
+    """G_q: the variables the action is guaranteed to write. Tools: the guaranteed fields of the definition plus the
+    output mapping; model, judge and user states: the declared writes."""
     a = st.action
     if a.kind == "tool":
         sure = ctx.spec(a.name).sure_outputs()
@@ -82,13 +84,14 @@ def task_inputs(m: Machine) -> list[str]:
 
 
 def seed_vars(m: Machine) -> frozenset:
-    """A_0：任务输入与有效初值。空字符串不计为有效初值。"""
+    """A_0: task inputs and valid initial values. An empty string does not count as a valid initial value."""
     return frozenset(v.name for v in m.variables
                      if v.init_from is not None or (v.init is not None and v.init != ""))
 
 
 def is_observable(st: State) -> bool:
-    """可观察状态：工具、结束、用户，以及声明为可观察的模型状态（写出交付内容的那些）。"""
+    """Observable states: tool, end, user, and model states declared observable (those that write deliverable
+    content)."""
     a = st.action
     if a.kind in ("tool", "end", "user"):
         return True
@@ -102,7 +105,7 @@ def is_zero_width(st: State) -> bool:
 
 
 def anchors(m: Machine) -> list[str]:
-    """Q_obs。"""
+    """Q_obs: the observable states."""
     return [sid for sid, st in m.states.items() if is_observable(st)]
 
 
@@ -118,7 +121,7 @@ def end_terminal(m: Machine, sid: str) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 三值护卫判定：只有已知取值的变量能定真假，其余一律「可能成立」
+# Three-valued guard evaluation: only variables with known values decide truth; everything else "may hold"
 # --------------------------------------------------------------------------- #
 _UNKNOWN = object()
 
@@ -151,7 +154,8 @@ def _tv(node: ast.AST, known: Mapping) -> Any:
 
 
 def truth(expr: str, known: Optional[Mapping] = None) -> Optional[bool]:
-    """护卫在已知取值 ``known`` 下的三值真值：True / False / None。空条件恒成立。"""
+    """Three-valued truth of a guard under the known values ``known``: True / False / None. An empty guard always
+    holds."""
     if not expr:
         return True
     try:
@@ -167,7 +171,8 @@ def maybe_true(expr: str, known: Optional[Mapping] = None) -> bool:
 
 
 def takeable(st: State, known: Optional[Mapping] = None) -> list[Transition]:
-    """按运行时顺序，在已知取值下可能被选中的转移：确定成立的边之后的边不再可达。"""
+    """Transitions that may be taken under the known values, in run-time order: edges after one that definitely holds
+    are unreachable."""
     out: list[Transition] = []
     for t in st.ordered_transitions():
         v = truth(t.cond, known)
@@ -180,14 +185,14 @@ def takeable(st: State, known: Optional[Mapping] = None) -> list[Transition]:
 
 
 def status_known(ctx: CompileContext, st: State, ok: Optional[bool]) -> dict:
-    """工具状态 st 的调用成败为 ok 时，护卫里已知的变量取值。"""
+    """Variable values known in guards when the call of tool state st has outcome ok."""
     if st.action.kind != "tool" or ok is None:
         return {}
     return ctx.spec(st.action.name).status_values(ok)
 
 
 def branch_class(expr: str, ctx: CompileContext, st: State) -> str:
-    """分支类别：success / failure / unknown（由工具成功判据的简单条件识别）。"""
+    """Branch class: success / failure / unknown (recognized for simple guards through the tool's success condition)."""
     if st.action.kind != "tool":
         return "unknown"
     ok, fail = maybe_true(expr, status_known(ctx, st, True)), maybe_true(expr, status_known(ctx, st, False))
@@ -199,14 +204,15 @@ def branch_class(expr: str, ctx: CompileContext, st: State) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# 图算法
+# Graph algorithms
 # --------------------------------------------------------------------------- #
 def zero_paths(m: Machine, src: str, known: Optional[Mapping] = None, *,
                include_src_zero: bool = False) -> dict[str, list[tuple[str, Transition]]]:
-    """从 src 出发、只经零宽状态可达的可观察状态 → 最短边序列 [(状态, 边)…]。
+    """Observable states reachable from src through zero-width states only → shortest edge sequence [(state, edge)…].
 
-    首条转移须与已知取值相容；零宽状态的出边全部允许。
-    ``include_src_zero``：src 自身是零宽状态（入口的情形），它的出边不受约束。
+    The first transition must be consistent with the known values; all outgoing edges of zero-width states are
+    allowed.
+    ``include_src_zero``: src itself is a zero-width state (the entry case); its outgoing edges are unconstrained.
     """
     out: dict[str, list] = {}
     if src not in m.states:
@@ -233,7 +239,8 @@ def zero_paths(m: Machine, src: str, known: Optional[Mapping] = None, *,
 
 
 def entry_anchors(m: Machine) -> dict[str, list[tuple[str, Transition]]]:
-    """入口只经零宽状态可达的可观察状态（入口本身可观察时即它自己）。"""
+    """Observable states reachable from the entry through zero-width states only (the entry itself when it is
+    observable)."""
     st = m.states.get(m.initial)
     if st is None:
         return {}
@@ -243,7 +250,7 @@ def entry_anchors(m: Machine) -> dict[str, list[tuple[str, Transition]]]:
 
 
 def reaches(m: Machine, a: str, b: str, *, without: Optional[str] = None) -> bool:
-    """全图上 a 能否到 b（可绕开 without）。a == b 时要求存在真正的环。"""
+    """Whether a can reach b in the whole graph (optionally avoiding without). When a == b a real cycle is required."""
     if a not in m.states or b not in m.states or without == a:
         return False
     stack, seen = [a], set()
@@ -274,7 +281,7 @@ def reachable(m: Machine) -> set[str]:
 
 
 def back_edges(m: Machine) -> list[tuple[str, Transition]]:
-    """回边：指向 DFS 栈上祖先（含自身）的边。"""
+    """Back edges: edges pointing to an ancestor on the DFS stack (including the state itself)."""
     WHITE, GRAY, BLACK = 0, 1, 2
     color = {s: WHITE for s in m.states}
     out: list = []
@@ -298,16 +305,17 @@ def back_edges(m: Machine) -> list[tuple[str, Transition]]:
 
 
 def counter_exit(expr: str) -> Optional[tuple[str, int]]:
-    """``cnt >= K`` 形式的上限出口 → (cnt, K)。"""
+    """A bound exit of the form ``cnt >= K`` → (cnt, K)."""
     mm = _COUNTER_EXIT.match(expr or "")
     return (mm.group(1), int(mm.group(2))) if mm else None
 
 
 # --------------------------------------------------------------------------- #
-# 模式的静态匹配（在机器状态上）：只看状态自己声明的属性
+# Static pattern matching (on machine states): only the attributes a state declares itself count
 # --------------------------------------------------------------------------- #
 def state_uses(m: Machine, st: State) -> frozenset:
-    """状态用到的变量：自己的需求，加上专门为它生成参数的模型状态读的变量。"""
+    """Variables a state uses: its own needs plus the variables read by the model states that only generate its
+    parameters."""
     out = set(need(st))
     for g in m.states.values():
         if g.action.kind == "model" and [t.to for t in g.transitions] == [st.id]:
@@ -316,7 +324,8 @@ def state_uses(m: Machine, st: State) -> frozenset:
 
 
 def static_match(pat: EventPattern, st: State, m: Machine) -> bool:
-    """状态是否可能产生匹配模式的事件。参数文本条件按模板引用的变量判；成败与先后不看。"""
+    """Whether a state may produce an event matching the pattern. Argument text conditions are decided by the variables
+    the template references; outcome and ordering are ignored."""
     a = st.action
     if pat.kind is not None and a.kind != pat.kind:
         return False
@@ -348,7 +357,8 @@ def static_match(pat: EventPattern, st: State, m: Machine) -> bool:
 
 
 def required_states(m: Machine, ctx: CompileContext) -> set[str]:
-    """Q_req：文档来源、且被某条规则模式提到的状态。绕过它们就是削弱约束。"""
+    """Q_req: states that come from the document and are mentioned by some rule pattern. Bypassing them weakens the
+    constraints."""
     pats = ctx.patterns()
     return {sid for sid, st in m.states.items()
             if st.origin == "document" and st.action.kind != "end"
@@ -356,7 +366,8 @@ def required_states(m: Machine, ctx: CompileContext) -> set[str]:
 
 
 def skip_blocked(m: Machine, p: str, q: str, req: set[str]) -> Optional[str]:
-    """Skip_M(p,q)：p→q 已有路径，且某个必经的 Q_req 状态会被直达转移绕过。返回该状态。"""
+    """Skip_M(p,q): a path p→q already exists and a direct transition would bypass a Q_req state that every such path
+    passes. Returns that state."""
     if not reaches(m, p, q):
         return None
     for r in sorted(req - {p, q}):
@@ -366,7 +377,7 @@ def skip_blocked(m: Machine, p: str, q: str, req: set[str]) -> Optional[str]:
 
 
 def summary_of(st: State) -> str:
-    """一个状态的一句话身份，给判断状态的提示词用。"""
+    """A one-line identity of a state, used in judge prompts."""
     a = st.action
     if a.kind == "tool":
         lab = getattr(a, "phase", "") or ""

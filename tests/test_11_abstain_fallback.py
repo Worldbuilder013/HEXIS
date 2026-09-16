@@ -1,16 +1,18 @@
-"""⑪ 判断弃权时路由到 FALLBACK，任务仍能完成。
+"""When the judge abstains, execution is routed to FALLBACK and the task still completes.
 
-判断动作拿不准就输出弃权标签；机器随即走兜底边进 FALLBACK（解释执行），而不是硬答一个
-可能错的标签。这是「一条路径至少错一次概率 ≤ Σεᵢ」里弃权作为调节阀的运行时体现。
+When a judge action is unsure it outputs the abstain label; the machine then takes the default edge
+into FALLBACK (interpretation) instead of forcing a label that may be wrong. This is the runtime
+form of abstention acting as the control valve in "the probability that a path makes at least one
+error is bounded by the sum of the judges' error rates".
 """
 
-from hexis.execution import runtime
 from hexis.examples import table_clean as tc
+from hexis.execution import runtime
 from hexis.machine.schema import FALLBACK
 
 
 def _run_with_abstaining_judge(task):
-    """判断永远弃权的模型。"""
+    """A model whose judge always abstains."""
     fs = tc.MemFS(task["files"])
     model = tc.build_model(abstain_on=lambda values: True)
     return runtime.run_task(tc.reference_machine(), task, model=model,
@@ -18,12 +20,12 @@ def _run_with_abstaining_judge(task):
 
 
 def test_abstain_routes_into_fallback():
-    # 用规范表头任务：判断本可直接答「规范」，但这里强制弃权
+    # use a task with a well-formed header: the judge could answer "well_formed" directly, but abstention is forced here
     tasks = [t for t in tc.gen_tasks(12, seed=9)
              if tc.is_canonical(",".join(t["files"][t["input"]["path"]]["header"]))]
     task = tasks[0]
     res = _run_with_abstaining_judge(task)
-    assert FALLBACK in res.path(), f"弃权后应进 FALLBACK，实际 {res.path()}"
+    assert FALLBACK in res.path(), f"should enter FALLBACK after abstaining, got {res.path()}"
 
 
 def test_task_still_completes_after_abstain():
@@ -32,4 +34,4 @@ def test_task_still_completes_after_abstain():
     task = tasks[0]
     res = _run_with_abstaining_judge(task)
     assert res.stopped == "terminal", res.error
-    assert tc.verify(task, res.trace)              # 弃权走解释兜底，任务照样完成
+    assert tc.verify(task, res.trace)              # abstention falls back to interpretation, and the task still completes

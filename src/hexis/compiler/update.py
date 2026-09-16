@@ -1,12 +1,14 @@
-"""逐条轨迹更新（算法文档第 7 节）。
+"""Trace-by-trace update.
 
-Accept(M', T, P_k) ⟺ Check(M') ∧ ⋀_{T'∈P_k∪{T}} Replay(M', T', π̃_{T'})。
-全部通过一次性提交；任一失败丢弃副本，机器与已接受集合不变。每条轨迹默认最多两次尝试：
-第一次允许更换已有状态的工具，第二次保留原工具。
+Accept(M', T, P_k) ⟺ Check(M') ∧ ⋀_{T'∈P_k∪{T}} Replay(M', T', π̃_{T'}).
+If everything passes, the change is committed at once; if anything fails, the copy is discarded and the machine and
+the accepted set stay unchanged. Every trace gets at most two attempts by default: the first may change the tool of an
+existing state, the second keeps the original tools.
 
-一条轨迹能不能参与更新，由**当前技能的规则**决定，不由固定的阶段规则决定：
-含无法识别事件的轨迹不参与（unsupported）；违反技能要求或外部禁止规则的不参与（excluded）；
-声明的终点与证据不符的不参与（violation）；没有可观察事件的跳过。
+Whether a trace can take part in the update is decided by **the current skill's rules**, not by fixed phase rules:
+traces with unrecognized events do not (unsupported); traces that violate skill requirements or external prohibition
+rules do not (excluded); traces whose claimed terminal disagrees with the evidence do not (violation); traces without
+observable events are skipped.
 """
 from __future__ import annotations
 
@@ -14,12 +16,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from hexis.machine.schema import Machine, Trace
 from hexis.compiler import check as _check
 from hexis.compiler.align import align
 from hexis.compiler.context import CompileContext
 from hexis.compiler.modify import build_candidate
 from hexis.compiler.traces import Prepared, prepare, violates_prohibitions
+from hexis.machine.schema import Machine, Trace
 
 
 @dataclass
@@ -47,7 +49,7 @@ def _events_brief(prep: Prepared) -> list[str]:
 
 def update_one(machine: Machine, prep: Prepared, accepted: list, ctx: CompileContext, *,
                attempts: int = 2) -> tuple[Machine, dict, Optional[Accepted]]:
-    """处理一条轨迹。返回 (新机器或原机器, 记录, 接受项或 None)。"""
+    """Process one trace. Returns (new or unchanged machine, record, accepted item or None)."""
     entry: dict = {"trace": prep.trace_id, "verdict": prep.verdict, "events": _events_brief(prep),
                    "tau": prep.tau, "attempts": []}
     for k in range(1, max(1, attempts) + 1):
@@ -58,7 +60,7 @@ def update_one(machine: Machine, prep: Prepared, accepted: list, ctx: CompileCon
             att["result"], att["why"] = "no_path", why
             entry["attempts"].append(att)
             if k == 1:
-                entry["status"], entry["why"] = "rejected", f"无对齐路径：{why}"
+                entry["status"], entry["why"] = "rejected", f"no alignment path: {why}"
                 return machine, entry, None
             continue
         att["cost"] = al.cost
@@ -83,7 +85,7 @@ def update_one(machine: Machine, prep: Prepared, accepted: list, ctx: CompileCon
                 broken = (acc.prep.trace_id, r2.why)
                 break
         if broken is not None:
-            att["result"], att["why"] = "protected_failed", f"{broken[0]}：{broken[1]}"
+            att["result"], att["why"] = "protected_failed", f"{broken[0]}: {broken[1]}"
             entry["attempts"].append(att)
             continue
         att["result"] = "accepted"
@@ -99,14 +101,14 @@ def update_one(machine: Machine, prep: Prepared, accepted: list, ctx: CompileCon
 
 def update(machine: Machine, traces: Sequence[tuple[Any, Optional[Trace], str]], ctx: CompileContext, *,
            attempts: int = 2, accepted_only: bool = False, progress=None) -> UpdateResult:
-    """处理全部轨迹。``traces`` 是 load_traces 的输出：(路径, Trace 或 None, 读取错误)。"""
+    """Process all traces. ``traces`` is the output of load_traces: (path, Trace or None, read error)."""
     res = UpdateResult(machine=machine)
     for path, trace, err in traces:
         name = Path(str(path)).stem
         if trace is None:
             res.entries.append({"trace": name, "status": "unreadable", "why": err})
         elif accepted_only and trace.verdict != "accepted":
-            res.entries.append({"trace": name, "status": "skipped", "why": f"判分 {trace.verdict}，只保留判对轨迹"})
+            res.entries.append({"trace": name, "status": "skipped", "why": f"verdict {trace.verdict}, only accepted traces are kept"})
         else:
             prep = prepare(trace, ctx, source=str(path))
             base = {"trace": prep.trace_id, "verdict": prep.verdict, "events": _events_brief(prep),
@@ -114,15 +116,15 @@ def update(machine: Machine, traces: Sequence[tuple[Any, Optional[Trace], str]],
             banned = violates_prohibitions(trace, res.machine)
             if prep.unsupported:
                 res.entries.append({**base, "status": "unsupported",
-                                    "why": "无法识别的事件：" + ", ".join(f"第 {s} 步 kind={k}" for s, k in prep.unsupported)})
+                                    "why": "unrecognized events: " + ", ".join(f"step {s} kind={k}" for s, k in prep.unsupported)})
             elif banned:
                 res.entries.append({**base, "status": "excluded", "why": banned})
             elif prep.requirement_violations:
-                res.entries.append({**base, "status": "excluded", "why": "；".join(prep.requirement_violations)})
+                res.entries.append({**base, "status": "excluded", "why": "; ".join(prep.requirement_violations)})
             elif prep.violation:
                 res.entries.append({**base, "status": "violation", "why": prep.violation})
             elif not prep.observable:
-                res.entries.append({**base, "status": "skipped", "why": "没有可观察事件"})
+                res.entries.append({**base, "status": "skipped", "why": "no observable events"})
             else:
                 m2, entry, acc = update_one(res.machine, prep, res.accepted, ctx, attempts=attempts)
                 entry["notes"] = list(prep.notes)

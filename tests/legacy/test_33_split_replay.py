@@ -1,25 +1,30 @@
-"""状态身份可以往回看、回放看不见它；开局工具让机器只有一个起点。
+"""State identity may look backwards while replay cannot see it; the opening tool gives the machine a
+single start.
 
-* ``context_key`` 把严格档 KEY 合并掉的「同一动作、不同前驱」分开，``k=0`` 退化成严格档；
-* ``Checker.split_state`` 分裂前后，所有 T+ 的回放结果**逐条相同**——克隆的动作是深拷贝，
-  ``replay._action_matches`` 只比动作不比身份（test_08 的结论，这里对受票版本再钉一次）；
-* ``split_groups`` 按列联表分组：每个前驱只去过一个出口才分得开；
-* ``compile_skill(begin=True)`` 让开局动作不同的轨迹不再 ``start_mismatch``，机器起点恒为
-  BEGIN_TOOL；回放对没垫开局步的原轨迹透明，且报的下标按**原轨迹**计。
+* ``context_key`` separates "same action, different predecessor", which the strict KEY merges;
+  ``k=0`` degenerates to the strict level;
+* before and after ``Checker.split_state``, replay results of all T+ traces are **identical one by
+  one** -- the cloned actions are deep copies, and ``replay._action_matches`` compares actions, not
+  identities (the conclusion of test_08, pinned again here for the receipt version);
+* ``split_groups`` groups by contingency table: separable only if each predecessor went to a single exit;
+* ``compile_skill(begin=True)`` stops traces with different opening actions from hitting
+  ``start_mismatch``, and the machine's start is always BEGIN_TOOL; replay is transparent to original
+  traces without the opening step, and reported indices count by the **original trace**.
 """
 from __future__ import annotations
 
 from hexis.legacy import compile_agent, compiler, replay
 from hexis.legacy.checker import Checker
-from hexis.traces.normalize import BEGIN_TOOL, canon_action, context_key, is_begin
 from hexis.machine.schema import Record, ToolAction, Trace, Transition, Variable
+from hexis.traces.normalize import BEGIN_TOOL, canon_action, context_key, is_begin
 from hexis.traces.trace_adapter import with_begin
 
 PROV = {"origin": "trace", "agent_id": "A1"}
 
 
 def _tool(step, name, **vars_):
-    # 回放按各状态的 writes 白名单从 output 取值，所以 output 也带上这一步的变量
+    # replay takes values from output through each state's writes whitelist, so output also carries
+    # this step's variables
     return Record(step=step, action={"kind": "tool", "name": name, "input": {}},
                   output=dict(vars_), vars=dict(vars_))
 
@@ -36,7 +41,8 @@ def test_context_key_separates_what_strict_key_merged():
     assert context_key(verify, [after_python], k=0) == canon_action(verify, strict=True)
     assert context_key(verify, [after_python]) != context_key(verify, [after_model])
     assert context_key(verify, [after_python])[:2] == canon_action(verify, strict=True)
-    # 同一前驱、参数不同的同名工具：身份仍相同（参数活在变量里）
+    # same predecessor, same tool name with different arguments: identity is still the same (arguments
+    # live in variables)
     verify2 = {"kind": "tool", "name": "math_verify", "input": {"argv": ["b"]}}
     assert context_key(verify, [after_python]) == context_key(verify2, [after_python])
 
@@ -46,16 +52,16 @@ def test_split_groups_by_contingency_and_by_position():
     assert compiler.split_groups(["p1", "p2", "p3"], ["A", "B"], c) == \
         {"A": ["p1", "p3"], "B": ["p2"]}
     mixed = {"p1": {"A": 3, "B": 1}, "p2": {"B": 2}}
-    assert compiler.split_groups(["p1", "p2"], ["A", "B"], mixed) is None     # p1 两头都去过
+    assert compiler.split_groups(["p1", "p2"], ["A", "B"], mixed) is None     # p1 went to both
     same = {"p1": {"A": 3}, "p2": {"A": 2}}
-    assert compiler.split_groups(["p1", "p2"], ["A", "B"], same) is None      # 没什么可分
+    assert compiler.split_groups(["p1", "p2"], ["A", "B"], same) is None      # nothing to split
     assert compiler.split_groups(["p1", "p2"], ["A", "B"]) == {"A": ["p1"], "B": ["p2"]}
     assert compiler.split_groups(["p1", "p2", "p3"], ["A", "B"]) is None
 
 
 # --------------------------------------------------------------------------- #
 def _fork_machine() -> Checker:
-    """s1 read(x) →(x=='a') p1 left → X verify ；→(默认) p2 right → X ；X → END。"""
+    """s1 read(x) -(x=='a')-> p1 left -> X verify; -(default)-> p2 right -> X; X -> END."""
     ck = Checker("toy")
     assert ck.open_machine(variables=[Variable(name="x")],
                            terminals=[{"id": "done"}]).accepted
@@ -93,7 +99,7 @@ def test_split_state_preserves_replay_of_all_traces():
     res_after = [replay.replay(after, t) for t in traces]
     assert [(r.ok, r.diverged_at) for r in res_after] == \
         [(r.ok, r.diverged_at) for r in res_before]
-    # 分裂真的发生了：两份克隆各自只从自己的前驱进
+    # the split really happened: each of the two clones is entered only from its own predecessor
     assert "X" not in after.states and {"X1", "X2"} <= set(after.states)
 
 
@@ -102,7 +108,8 @@ DOC = "# toy\n\n## S1 Do\nRead, then act, then verify, then finish.\n"
 
 
 def _open_traces() -> list[Trace]:
-    """三种开局动作各两条（支持度过 min_support），之后都 verify → end。"""
+    """Two traces for each of three opening actions (support passes min_support), all followed by
+    verify -> end."""
     out = []
     for first in ("run_python", "math_verify", "read_reference"):
         for k in range(2):
@@ -126,7 +133,7 @@ def test_begin_gives_one_initial_state_and_no_start_mismatch():
     m = res.machine
     assert is_begin(m.states[m.initial].action)
     assert m.states[m.initial].action.name == BEGIN_TOOL
-    # 回放对没垫开局步的原轨迹透明
+    # replay is transparent to original traces without the opening step
     assert all(replay.replay(m, t).ok for t in traces)
 
 
@@ -136,11 +143,12 @@ def test_with_begin_is_idempotent_and_keeps_real_steps():
     assert is_begin(v.records[0].action) and v.records[0].step == 0
     assert [r.step for r in v.records[1:]] == [r.step for r in t.records]
     assert with_begin(v).records == v.records
-    assert t.records[0].action["name"] == "run_python"           # 原轨迹一个字节不动
+    assert t.records[0].action["name"] == "run_python"           # the original trace is untouched
 
 
 def test_walk_reports_indices_of_the_original_trace():
-    """机器起点是开局工具、轨迹没垫：偏离下标按原轨迹计，不多 1。"""
+    """The machine starts with the opening tool but the trace has no opening step: divergence indices
+    count by the original trace, not off by one."""
     ck = Checker("toy")
     assert ck.open_machine(terminals=[{"id": "done"}]).accepted
     assert ck.add_state("b", ToolAction(name=BEGIN_TOOL), initial=True).accepted
@@ -154,4 +162,4 @@ def test_walk_reports_indices_of_the_original_trace():
     assert replay.replay(m, good).ok
     r = replay.walk(m, bad)
     assert not r.ok and r.diverged_at == 1
-    assert [i for i, _s in r.seq] == [-1, 0]                      # 虚拟开局步记 -1
+    assert [i for i, _s in r.seq] == [-1, 0]                      # the virtual opening step is recorded as -1

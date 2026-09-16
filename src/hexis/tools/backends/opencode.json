@@ -1,9 +1,9 @@
 {
   "backend": "opencode",
-  "description": "OpenCode 原生工具。所有工具的结果经采集器封装为 ok / returncode / stdout / stderr。",
+  "description": "OpenCode native tools. The collector wraps every tool result as ok / returncode / stdout / stderr.",
   "tools": {
     "bash": {
-      "description": "在工作目录里运行一条 shell 命令。",
+      "description": "Run one shell command in the working directory.",
       "input_schema": {"command": {"type": "string", "required": true},
                        "description": {"type": "string", "constant": true},
                        "timeout": {"type": "integer", "constant": true}},
@@ -11,7 +11,7 @@
       "success": "returncode == 0", "primary": "stdout"
     },
     "read": {
-      "description": "读一个文件的文本内容。",
+      "description": "Read the text content of a file.",
       "input_schema": {"filePath": {"type": "string", "required": true},
                        "offset": {"type": "integer", "constant": true},
                        "limit": {"type": "integer", "constant": true}},
@@ -19,14 +19,14 @@
       "success": "returncode == 0", "primary": "stdout", "label": "probe"
     },
     "write": {
-      "description": "把文本写进一个文件（覆盖）。",
+      "description": "Write text to a file (overwriting it).",
       "input_schema": {"filePath": {"type": "string", "required": true},
                        "content": {"type": "string", "required": true}},
       "output_schema": {"ok": "boolean", "returncode": "integer", "stdout": "string", "stderr": "string"},
       "success": "returncode == 0", "primary": "stdout", "label": "apply"
     },
     "edit": {
-      "description": "把文件里的一段文本替换成另一段。",
+      "description": "Replace one piece of text in a file with another.",
       "input_schema": {"filePath": {"type": "string", "required": true},
                        "oldString": {"type": "string", "required": true},
                        "newString": {"type": "string", "required": true},
@@ -35,19 +35,19 @@
       "success": "returncode == 0", "primary": "stdout", "label": "apply"
     },
     "list": {
-      "description": "列一个目录。",
+      "description": "List a directory.",
       "input_schema": {"path": {"type": "string"}, "ignore": {"type": "array", "constant": true}},
       "output_schema": {"ok": "boolean", "returncode": "integer", "stdout": "string", "stderr": "string"},
       "success": "returncode == 0", "primary": "stdout", "label": "probe"
     },
     "glob": {
-      "description": "按通配模式找文件。",
+      "description": "Find files by glob pattern.",
       "input_schema": {"pattern": {"type": "string", "required": true}, "path": {"type": "string"}},
       "output_schema": {"ok": "boolean", "returncode": "integer", "stdout": "string", "stderr": "string"},
       "success": "returncode == 0", "primary": "stdout", "label": "probe"
     },
     "grep": {
-      "description": "在文件里搜文本。",
+      "description": "Search for text in files.",
       "input_schema": {"pattern": {"type": "string", "required": true}, "path": {"type": "string"},
                        "include": {"type": "string", "constant": true}},
       "output_schema": {"ok": "boolean", "returncode": "integer", "stdout": "string", "stderr": "string"},

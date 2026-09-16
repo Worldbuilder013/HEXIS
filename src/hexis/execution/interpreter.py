@@ -1,16 +1,18 @@
-"""``interpreter`` —— :mod:`hexis.execution.runtime` 的**别名模块**：同一份实现，两个名字。
+"""``interpreter`` -- an **alias module** for :mod:`hexis.execution.runtime`: one implementation, two names.
 
-为什么两个名字都留着：规格文档把这一层叫「解释器」（``interpreter``），照它写的代码会
-``from hexis import interpreter``；而这个包从第一天起就把它叫 ``runtime``，12 个测试文件
-是按 ``from hexis import runtime`` 导入的，轨迹与报告里也已经写着 ``runtime.run_task``
-的出身。改名能让规格好看一点，代价是一次性打断既有导入与既有产物的可追溯性——不值。于是这里
-只做一件事：把 runtime 的公开面**原样**再导出一遍，让两个名字都能解析。
+Why both names are kept: the design calls this layer the "interpreter" (``interpreter``), and code written
+against that name imports ``interpreter``; the package, however, has called it ``runtime`` from day one, many
+tests import ``runtime``, and existing traces and reports already record ``runtime.run_task`` as their origin.
+Renaming would make the naming look tidier, at the cost of breaking existing imports and the traceability of
+existing artifacts in one go -- not worth it. So this module does exactly one thing: re-export runtime's public
+surface **unchanged**, so that both names resolve.
 
-**没有第二份实现。** 这里不新增行为、不包装、不改默认值：``interpreter.run_task is
-runtime.run_task`` 恒真（``test_26`` 把这条钉死）。两份实现会各自漂移，而它们本来就是同一个
-解释器——一台机器怎么跑、怎么记账、怎么进 FALLBACK，只该有一处说了算。
+**There is no second implementation.** Nothing here adds behavior, wraps anything or changes defaults:
+``interpreter.run_task is runtime.run_task`` always holds (``tests/test_26_runtime.py`` pins this). Two
+implementations would drift apart, and they are one and the same interpreter -- how a machine runs, keeps its
+accounts and enters FALLBACK should be decided in exactly one place.
 
-要改行为请改 :mod:`hexis.execution.runtime`，这里跟着动就好。
+To change behavior, change :mod:`hexis.execution.runtime`; this module follows along.
 """
 
 from __future__ import annotations

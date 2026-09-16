@@ -1,18 +1,21 @@
-"""文件答案题（DABench / SealQA 这类）的通用工具：把题目资产放进作业目录、按 metadata.verifier 判分。
+"""Shared helpers for file-answer tasks (DABench / SealQA and the like).
 
-任务 yaml 的 metadata 约定：
-  assets: [相对 root 的文件路径, ...]   → 逐个复制到作业目录（保留文件名）
-  assets_dir / assets_target: 目录 → 复制成作业目录下的 assets_target 子目录
+Puts the task assets into the working directory and grades according to metadata.verifier.
+
+Conventions for metadata in the task yaml:
+  assets: [file paths relative to root, ...]   → each copied into the working directory (file name kept)
+  assets_dir / assets_target: directory → copied as the assets_target subdirectory of the working directory
   verifier: dabench | sealqa_judge
-  answers（dabench）: [[name, value], ...]；answer（sealqa）: 参考答案文本
+  answers (dabench): [[name, value], ...]; answer (sealqa): reference answer text
 """
 from __future__ import annotations
 
 import pathlib
 import shutil
 
+
 def stage_assets(meta: dict, dest: pathlib.Path, root: str | pathlib.Path = ".") -> dict:
-    """复制资产（路径相对 ``root``），返回机器可用的输入变量：data_path（第一个文件）、docs_dir（目录）。"""
+    """Copy the assets (paths relative to ``root``) and return machine input variables: data_path (first file), docs_dir."""
     base = pathlib.Path(root)
     dest = pathlib.Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -32,7 +35,7 @@ def stage_assets(meta: dict, dest: pathlib.Path, root: str | pathlib.Path = ".")
 
 
 def grade(meta: dict, answer_path: pathlib.Path, reply_text: str | None = None) -> tuple:
-    """→ (passed | None, why, source)。sealqa_judge 由人（模型判官）事后判分，这里只记 None。"""
+    """→ (passed | None, why, source). sealqa_judge is graded later by a (model) judge, so only None is recorded here."""
     kind = str(meta.get("verifier") or "")
     answer_path = pathlib.Path(answer_path)
     if kind == "dabench":
@@ -43,14 +46,14 @@ def grade(meta: dict, answer_path: pathlib.Path, reply_text: str | None = None) 
         if reply_text and parse_pairs(reply_text):
             ok, why = grade_text(reply_text, meta["answers"])
             return ok, why, "reply_text"
-        return False, "没有产出 answer.txt", "none"
+        return False, "no answer.txt produced", "none"
     if kind == "sealqa_judge":
         if answer_path.is_file():
-            return None, "待判官判分", "answer.txt"
+            return None, "awaiting grading by the judge", "answer.txt"
         if reply_text and reply_text.strip():
-            return None, "待判官判分（取自回复正文）", "reply_text"
-        return False, "没有产出 answer.txt", "none"
-    raise ValueError(f"不认识的 verifier: {kind!r}")
+            return None, "awaiting grading by the judge (taken from the reply text)", "reply_text"
+        return False, "no answer.txt produced", "none"
+    raise ValueError(f"unknown verifier: {kind!r}")
 
 
 __all__ = ["stage_assets", "grade"]

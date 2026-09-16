@@ -1,4 +1,4 @@
-"""模型实现的工具：机器里有、后端没有的工具，按注册表定义由模型写成一条 shell 命令交给后端执行。"""
+"""Model-realized tools: a tool the machine has but the backend lacks is written by the model, from its registry definition, as one shell command that the backend executes."""
 from __future__ import annotations
 
 from hexis.tools.backends.realized import RealizedTools
@@ -40,7 +40,7 @@ def test_abstract_tool_is_realized_through_the_model_and_shell():
     assert native.calls[0][0] == "bash" and "inspect /w/in.xlsx" in native.calls[0][1]["command"]
     assert "Inspect the workbook" in model.prompts[0] and "/w/in.xlsx" in model.prompts[0]
     assert tools.realized[0]["name"] == "inspect_workbook"
-    # 原生工具直接透传，不调模型
+    # native tools are passed straight through, without calling the model
     tools.call("read", {"filePath": "/w/in.xlsx"})
     assert len(model.prompts) == 1 and native.calls[-1][0] == "read"
 

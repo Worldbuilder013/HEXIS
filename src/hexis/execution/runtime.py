@@ -1,28 +1,34 @@
-"""状态机解释器：跑一台机器（或一段 FALLBACK 解释）出一条轨迹。
+"""Machine interpreter: run one machine (or a FALLBACK interpretation) and produce one trace.
 
-一次运行是一个确定性循环：跑当前状态的动作 → 按声明顺序求跳转条件 → 第一个为真的边胜出 →
-到终止或撞步数上限。三件事这里必须做对：
+A run is a deterministic loop: execute the current state's action -> evaluate the transition guards in
+declaration order -> the first edge that holds wins -> until a terminal or the step limit. Three things must
+be right here:
 
-**确定性。** 同一份输入跑两次走同一条路。转移按声明顺序求值（兜底边永远最后），判断动作
-交给模型的桩/实现自行保证 ``temperature=0``。不确定的解释器会让「这次退步是改坏了还是抽签
-抽差了」变得无法分辨。
+**Determinism.** The same input run twice takes the same path. Transitions are evaluated in declaration order
+(the default edge always last); judge actions rely on the model stub/implementation to guarantee
+``temperature=0`` itself. A nondeterministic interpreter makes it impossible to tell whether a regression came
+from a bad change or from an unlucky draw.
 
-**停机原因要能分辨。** ``terminal``（正常）/ ``state_error``（某步炸了或条件求值撞未定义
-变量）/ ``stuck``（没有边可走）/ ``max_steps``（转圈）。这四种在「结果不对」上一模一样，
-但要改的东西完全不同。
+**Stop reasons must be distinguishable.** ``terminal`` (normal) / ``state_error`` (a step blew up, or a guard
+evaluation hit an undefined variable) / ``stuck`` (no edge to take) / ``max_steps`` (going in circles). All four
+look the same as "the result is wrong", but each calls for a completely different fix.
 
-**轨迹是「关于它自己」的。** 每条 :class:`~hexis.machine.schema.Record` 描述这台机器怎么走、
-读写了哪些变量，不含参照答案，因此整条都能交给编译器 agent 看。工具结果由宿主（这里）
-填进 ``output``，不由模型编。
+**A trace is "about itself".** Each :class:`~hexis.machine.schema.Record` describes how this machine moved and
+which variables it read and wrote; it carries no reference answer, so the whole trace can be shown to the
+compiler agent. Tool results are filled into ``output`` by the host (here), not made up by the model.
 
-``FALLBACK`` 状态特殊：到达它就切「模型读整份文档 + 历史，逐步解释执行」，同时照常记录
-轨迹。条件覆盖不到、判断弃权、编译尚浅时都会走到这里——它让机器在任何学习程度下都能用。
-解释段照样跑真动作：工具、生成（``model``）、带最终答案的终止都认。
+The ``FALLBACK`` state is special: reaching it switches to "the model reads the whole document + history and
+executes the procedure step by step" (interpreted execution), while the trace keeps being recorded as usual.
+Runs end up here when guards do not cover a case, when a judge abstains, or while compilation is still shallow
+-- it keeps the machine usable at any stage of learning. The interpreted segment still runs real actions: tools,
+generation (``model``), and terminals that carry a final answer are all accepted.
 
-**执行侧的账另开一路。** 每步的 token、耗时、真正执行的 argv 进 ``Record.meta``，整趟的用量
-与回退位置进 :class:`RunResult`；两者都不进 ``action``/``output``，因此不参与规范化、不参与
-评判、不改变状态身份。账的第一纪律是**测不到就说测不到**：模型接口没报 usage 时留 ``None``，
-绝不按单价估一个数填进去——估出来的数字会被下游当实测读。
+**Execution-side accounting is kept separately.** Per-step tokens, latency and the argv actually executed go
+into ``Record.meta``; whole-run usage and the fallback position go into :class:`RunResult`. Neither goes into
+``action``/``output``, so they take no part in normalization or judging and do not change state identity. The
+first rule of accounting is **if it cannot be measured, say so**: when the model interface reports no usage,
+leave ``None``; never fill in a number estimated from unit prices -- an estimate will be read downstream as a
+measurement.
 """
 
 from __future__ import annotations
@@ -35,9 +41,9 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
 from hexis.machine import cond
+from hexis.machine.schema import FALLBACK, Machine, Record, Trace
 from hexis.traces import normalize as _normalize
 from hexis.traces import phases as _phases
-from hexis.machine.schema import FALLBACK, Machine, Record, Trace
 
 STOP_TERMINAL = "terminal"
 STOP_STATE_ERROR = "state_error"
@@ -52,21 +58,24 @@ _VAR_RE = re.compile(r"\$\{(\w+)\}")
 
 @dataclass
 class RunResult:
-    """一次运行的全部可观察结果。``trace`` 是那条轨迹（verdict 待评判补）。
+    """Everything observable about one run. ``trace`` is its trace (the verdict is filled in by judging).
 
-    前五个字段是「怎么停的」，后面几个是**实验报告要统计的账**，两条纪律：
+    The first five fields say "how it stopped"; the ones after them are **the accounting the experiment report
+    aggregates**, under two rules:
 
-    * **测不到就说测不到。** ``prompt_tokens``/``completion_tokens`` 为 ``None`` 表示模型接口
-      这一趟根本没报用量（:class:`~hexis.llm.model_iface.ScriptedModel` 没有 ``usage()``，真实
-      端点也可能不报），**不是**「花了 0 个 token」。``0`` 只在确实一次模型都没调时出现。按
-      token 单价估出来的数字会被下游当实测读，那比空着更糟。``unmeasured_calls`` 明说这趟有
-      几次调用没测到。
-    * **回退要能定位。** 交付物的指标 5 是「回退率与位置清单」：``fallback_steps`` 是解释段跑
-      了几步，``fallback_entry`` 是**从哪个状态**切进去的，``fallback_entry_step`` 是解释段第一
-      条记录的步号。起点即回退态（空机器）时 ``fallback_entry`` 记 ``FALLBACK`` 自己，表示
-      「全程解释」而不是「从某处退下来」。
+    * **If it cannot be measured, say so.** ``prompt_tokens``/``completion_tokens`` being ``None`` means the
+      model interface reported no usage at all for this run (:class:`~hexis.llm.model_iface.ScriptedModel`
+      has no ``usage()``, and real endpoints may not report it either); it does **not** mean "spent 0 tokens".
+      ``0`` only appears when no model call was made at all. A number estimated from per-token prices would be
+      read downstream as a measurement, which is worse than leaving it empty. ``unmeasured_calls`` states how
+      many calls in this run were not measured.
+    * **Fallbacks must be locatable.** The report needs a fallback rate and a list of fallback positions:
+      ``fallback_steps`` is how many steps the interpreted segment ran, ``fallback_entry`` is **which state**
+      it switched in from, and ``fallback_entry_step`` is the step number of the first record of the
+      interpreted segment. When the start state is the fallback state (empty machine), ``fallback_entry``
+      records ``FALLBACK`` itself, meaning "interpreted throughout" rather than "fell back from somewhere".
 
-    ``wall_s`` 是本机墙钟，永远测得到，所以是数不是 ``None``。
+    ``wall_s`` is local wall-clock time, which is always measurable, so it is a number, not ``None``.
     """
 
     trace: Trace
@@ -81,23 +90,23 @@ class RunResult:
     fallback_steps: int = 0
     fallback_entry: Optional[str] = None
     fallback_entry_step: Optional[int] = None
-    #: 回退枢纽里重试了几次（回到出错那一步的入口重新生成、重新执行）。
+    #: how many retries the fallback hub made (going back to the entry of the failing step to regenerate and re-execute).
     retries: int = 0
 
     def path(self) -> list[str]:
-        """走过的状态序列。确定性测试比它，不比耗时。"""
+        """The sequence of visited states. Determinism tests compare this, not timings."""
         return [r.state for r in self.trace.records if r.state]
 
     def entered_fallback(self) -> bool:
-        """这趟有没有落进解释段（回退率的分子）。"""
+        """Whether this run entered the interpreted segment (the numerator of the fallback rate)."""
         return self.fallback_steps > 0
 
 
 # --------------------------------------------------------------------------- #
-# 两段纯逻辑：从模型输出里取 JSON 对象、截取异常首行
+# Two pieces of pure logic: extract a JSON object from model output, surface the exception line
 # --------------------------------------------------------------------------- #
 def _first_json_object(text: str) -> Optional[dict]:
-    """从一段文本里取第一个完整的 JSON 对象。模型很少只回一个裸对象，能救回就别退回失败。"""
+    """Extract the first complete JSON object from a piece of text. Models rarely reply with a bare object, so salvage it rather than fail."""
     s = text or ""
     start = s.find("{")
     while start >= 0:
@@ -129,7 +138,7 @@ def _first_json_object(text: str) -> Optional[dict]:
 
 
 def _exception_first(err: str, limit: int = 400) -> str:
-    """把 traceback 里真正那句异常提到前面（截断取前 N 字符时别把它截掉）。"""
+    """Move the actual exception line of a traceback to the front (so truncating to the first N characters does not cut it off)."""
     text = (err or "").strip()
     if not text:
         return ""
@@ -139,23 +148,24 @@ def _exception_first(err: str, limit: int = 400) -> str:
     tail = lines[-1]
     frame = next((ln.strip() for ln in reversed(lines[:-1])
                   if ln.strip().startswith("File ")), "")
-    head = tail + (f"  （{frame.split('/')[-1]}）" if frame else "")
+    head = tail + (f"  ({frame.split('/')[-1]})" if frame else "")
     return (head + "\n" + text)[:limit]
 
 
 # --------------------------------------------------------------------------- #
-# 执行侧的账：用量 / 耗时 / argv / 提示词摘要
+# Execution-side accounting: usage / latency / argv / prompt digest
 # --------------------------------------------------------------------------- #
-#: 从模型接口的 ``usage()`` 里认的键。多出来的键一律不管（别的实现可以自由加）。
+#: keys read from the model interface's ``usage()``. Extra keys are ignored (other implementations may add them freely).
 _USAGE_KEYS = ("prompt_tokens", "completion_tokens", "llm_calls", "unmeasured_calls")
 
 
 def _usage_of(model: Any) -> Optional[dict]:
-    """模型接口报的**累计**用量快照；没有 ``usage()`` 就返回 ``None``。
+    """A snapshot of the **cumulative** usage reported by the model interface; ``None`` without ``usage()``.
 
-    鸭子类型：``llm_client.ModelAdapter`` 有 ``usage()``，测试桩
-    :class:`~hexis.llm.model_iface.ScriptedModel` 没有——不为桩补接口、也不给桩编数，缺就是
-    缺（缺的后果是 token 字段留 ``None``，见 :func:`_step_tokens`）。
+    Duck typing: ``llm_client.ModelAdapter`` has ``usage()``, the test stub
+    :class:`~hexis.llm.model_iface.ScriptedModel` does not -- we neither add the interface to the stub nor invent
+    numbers for it; missing is missing (the consequence is that the token fields stay ``None``, see
+    :func:`_step_tokens`).
     """
     fn = getattr(model, "usage", None)
     if not callable(fn):
@@ -163,14 +173,14 @@ def _usage_of(model: Any) -> Optional[dict]:
     try:
         u = fn()
     except Exception:                                       # noqa: BLE001
-        return None                                         # 记账炸了不许影响执行
+        return None                                         # a failure in accounting must not affect execution
     if not isinstance(u, Mapping):
         return None
     return {k: u.get(k) for k in _USAGE_KEYS}
 
 
 def _grew(before: Optional[dict], after: Optional[dict], key: str) -> Optional[int]:
-    """两次快照之间某个计数涨了多少。任一侧不是整数就返回 ``None``（不当 0）。"""
+    """How much a counter grew between two snapshots. Returns ``None`` (not 0) if either side is not an integer."""
     if not before or not after:
         return None
     a, b = after.get(key), before.get(key)
@@ -183,11 +193,12 @@ def _grew(before: Optional[dict], after: Optional[dict], key: str) -> Optional[i
 
 def _step_tokens(before: Optional[dict], after: Optional[dict],
                  calls: int) -> tuple[Optional[int], Optional[int], int]:
-    """一段区间的 ``(prompt_tokens, completion_tokens, 没测到的调用数)``。
+    """``(prompt_tokens, completion_tokens, number of unmeasured calls)`` for one interval.
 
-    三种情形分清楚：**一次模型都没调** ⇒ ``(0, 0, 0)``，这是测量不是估算；**接口不报用量**
-    ⇒ ``(None, None, calls)``；**报了、但这段的调用全被它记成 unmeasured** ⇒ 同样 ``None``
-    ——端点没给 usage 时 ``ModelAdapter`` 会把 0 累加进去，照抄那个 0 就等于编数。
+    Three cases are kept apart: **no model call at all** => ``(0, 0, 0)``, which is a measurement, not an
+    estimate; **the interface reports no usage** => ``(None, None, calls)``; **usage is reported, but every call
+    in the interval was counted as unmeasured** => ``None`` as well -- when the endpoint gives no usage,
+    ``ModelAdapter`` adds 0 to its totals, and copying that 0 would amount to inventing a number.
     """
     if calls <= 0:
         return 0, 0, 0
@@ -202,13 +213,14 @@ def _step_tokens(before: Optional[dict], after: Optional[dict],
 
 
 def _argv_of(tools: Any, name: str, out: Any) -> Optional[list]:
-    """这一步**真正执行的** argv。工具产出里带就用产出里的，否则问工具对象自己。
+    """The argv **actually executed** in this step. Taken from the tool output if present, otherwise asked of the tool object.
 
-    :class:`~hexis.legacy.sandbox.ExecResult` 记的是 ``command``，别的工具可能叫 ``argv``/``cmd``。
-    都拿不到就返回 ``None``——报告里宁可空着，也不要把 input 模板反推出来的命令行冒充成真跑过
-    的那条。这一栏抓的正是两者的差：``math_verify.py`` 的 ``--json`` 必须在子命令**之前**，而
-    执行器还会按标定记录在案的那条控制把 ``.venv/bin/python3`` 前缀改写成本机真实解释器
-    （见 ``docs/HARNESS_CALIBRATION.md`` 第 4 节第 3 条）。模板里写的和真跑的不是同一行。
+    :class:`~hexis.legacy.sandbox.ExecResult` records ``command``; other tools may call it ``argv``/``cmd``. If
+    none is available, return ``None`` -- the report would rather leave it empty than pass off a command line
+    reconstructed from the input template as the one that really ran. This column captures exactly the
+    difference between the two: ``math_verify.py`` needs ``--json`` **before** the subcommand, and the executor
+    also rewrites the ``.venv/bin/python3`` prefix to the real local interpreter (a control recorded during
+    harness calibration). What the template says and what actually ran are not the same line.
     """
     src = out if isinstance(out, Mapping) else {}
     for key in ("argv", "command", "cmd"):
@@ -230,10 +242,11 @@ def _argv_of(tools: Any, name: str, out: Any) -> Optional[list]:
 
 def _meta(ms: float, calls: int, before: Optional[dict], after: Optional[dict], *,
           argv: Optional[list] = None) -> dict:
-    """一步的执行侧账，进 ``Record.meta``。
+    """One step's execution-side accounting, stored in ``Record.meta``.
 
-    ``prompt_tokens``/``completion_tokens`` 两个键**每步都在**（值可能是 ``None``）：报告要能
-    分清「这步没花」与「这步没测到」，键时有时无就只能猜。
+    The ``prompt_tokens``/``completion_tokens`` keys are **present on every step** (their values may be
+    ``None``): the report must be able to tell "this step spent nothing" from "this step was not measured", and
+    keys that come and go would leave it guessing.
     """
     prompt, completion, unmeasured = _step_tokens(before, after, calls)
     meta: dict = {"ms": round(ms, 3), "llm_calls": calls,
@@ -246,10 +259,11 @@ def _meta(ms: float, calls: int, before: Optional[dict], after: Optional[dict], 
 
 
 def prompt_digest(template: str, values: Mapping) -> str:
-    """渲染后提示词的稳定摘要：``sha256(模板 + 读到的变量取值的规范 JSON)``。
+    """A stable digest of the rendered prompt: ``sha256(template + canonical JSON of the values read)``.
 
-    同模板 + 同取值 ⇒ 同摘要，且跨进程稳定（不用 :func:`hash`，它每进程加盐）。它是「这一步
-    到底问了什么」的可核对锚，全文则不进轨迹（理由见 :func:`_model_action`）。
+    Same template + same values => same digest, stable across processes (it does not use :func:`hash`, which is
+    salted per process). It is a verifiable anchor for "what exactly this step asked"; the full text does not go
+    into the trace (see :func:`_model_action` for why).
     """
     payload = json.dumps({str(k): values.get(k) for k in sorted(values or {}, key=str)},
                          ensure_ascii=False, sort_keys=True, default=str)
@@ -258,18 +272,22 @@ def prompt_digest(template: str, values: Mapping) -> str:
 
 def _model_action(template: str, reads: Any, values_read: Mapping, *,
                   template_id: str, inline_template: bool = True) -> dict:
-    """``model`` 动作在轨迹里的样子：**模板 id + 模板文本 + reads + 提示词 sha256**，
-    **不含渲染后的全文**。
+    """What a ``model`` action looks like in the trace: **template id + template text + reads + prompt sha256**,
+    **without the rendered full text**.
 
-    为什么不记渲染全文：渲染结果里嵌着整道题面（MATH-500 的题干动辄几百字），每步存一份会把
-    一条轨迹撑到题面的十几倍，而那段文本**轨迹里已经有了**——它在 ``Record.vars`` 里，再记一遍
-    只是重复。编译器要的是另外几样，这里都给：``template_id`` + 模板文本给**状态身份**
-    （``normalize`` 的严格档比的就是 ``prompt``，同源两侧因此对得上）、``reads`` 给「这一步真正
-    消费了哪些变量」的变量归属、``prompt_sha256`` 给「同模板同取值 ⇒ 同一次提问」的可核对性
-    ——摘要在手，日后要复现某一步问了什么，拿模板与那步的 ``vars`` 重算一遍就能自证。
+    Why the rendered text is not recorded: the rendering embeds the whole problem statement (MATH-500 problems
+    often run to hundreds of characters), and storing a copy on every step would inflate a trace to more than
+    ten times the size of the problem, while that text is **already in the trace** -- it is in ``Record.vars``,
+    so recording it again is pure duplication. The compiler needs a few other things, all provided here:
+    ``template_id`` + the template text give **state identity** (the strict level of ``normalize`` compares
+    exactly ``prompt``, so two sides from the same source line up), ``reads`` gives variable ownership for
+    "which variables this step actually consumed", and ``prompt_sha256`` makes "same template, same values =>
+    the same question" verifiable -- with the digest in hand, reproducing later what a step asked only takes
+    recomputing it from the template and that step's ``vars``.
 
-    ``inline_template=False`` 用于 FALLBACK：那里的「模板」是整份技能文档（几十 KB），逐步内联
-    比记渲染全文还糟，所以只留 id 与摘要。
+    ``inline_template=False`` is used for FALLBACK: there the "template" is the whole skill document (tens of
+    KB), and inlining it on every step would be even worse than recording the rendered text, so only the id and
+    the digest are kept.
     """
     act: dict = {"kind": "model", "template_id": template_id}
     if inline_template:
@@ -280,9 +298,10 @@ def _model_action(template: str, reads: Any, values_read: Mapping, *,
 
 
 def bind_outputs(raw: Any, binds: Any) -> Any:
-    """按 ``ToolAction.binds`` 把工具产出改名：``{"stdout": "workbook_content"}`` 让
-    ``out["stdout"]`` 同时以 ``workbook_content`` 之名出现。原键保留，所以 ``writes`` 里
-    同时列 ``returncode`` 与语义名都收得到。``raw`` 不是对象或没有绑定时原样返回。"""
+    """Rename tool outputs according to ``ToolAction.binds``: ``{"stdout": "workbook_content"}`` makes
+    ``out["stdout"]`` also appear under the name ``workbook_content``. The original key is kept, so listing both
+    ``returncode`` and the semantic name in ``writes`` collects both. ``raw`` is returned unchanged when it is
+    not an object or there are no binds."""
     if not binds or not isinstance(raw, dict):
         return raw
     mapped = dict(raw)
@@ -293,10 +312,10 @@ def bind_outputs(raw: Any, binds: Any) -> Any:
 
 
 def rebuild(raw: Any, names: list[str]) -> dict:
-    """按名字白名单**重新构造**一个对象，不是过滤——声明之外的一律丢弃，新键默认扣下。
+    """**Reconstruct** an object from a whitelist of names rather than filtering -- anything undeclared is dropped, and new keys are withheld by default.
 
-    机内状态出参与会话侧出参共用这条
-    政策，判据放一处。``raw`` 不是对象时返回空 dict。
+    In-machine state outputs and session-side outputs share this
+    policy, so the rule lives in one place. Returns an empty dict when ``raw`` is not an object.
     """
     if isinstance(raw, str):
         try:
@@ -309,10 +328,10 @@ def rebuild(raw: Any, names: list[str]) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 模板填充与选边
+# Template filling and edge selection
 # --------------------------------------------------------------------------- #
 def fill_template(obj: Any, values: dict) -> Any:
-    """把动作 input 模板里的 ``${var}`` 用变量填掉。整体是 ``${var}`` 时保留原类型。"""
+    """Fill the ``${var}`` placeholders in an action's input template from the variables. A value that is exactly ``${var}`` keeps its original type."""
     if isinstance(obj, str):
         m = _VAR_RE.fullmatch(obj)
         if m:
@@ -326,10 +345,11 @@ def fill_template(obj: Any, values: dict) -> Any:
 
 
 def pick_edge(machine: Machine, sid: str, values: dict):
-    """选下一条边：按声明顺序（兜底边最后）第一个条件为真的胜出。
+    """Pick the next edge: in declaration order (default edge last), the first whose guard holds wins.
 
-    返回 ``(edge, error)``。条件求值撞未定义变量时返回 error（不当假）——静默走兜底会把
-    「谓词写崩」伪装成「算错了」，那是最难查的失败。
+    Returns ``(edge, error)``. When guard evaluation hits an undefined variable an error is returned (it is not
+    treated as false) -- silently taking the default edge would disguise "the predicate is broken" as "the
+    computation was wrong", the hardest kind of failure to track down.
     """
     for t in machine.out_edges(sid):
         if not t.cond:
@@ -338,26 +358,30 @@ def pick_edge(machine: Machine, sid: str, values: dict):
             if cond.evaluate(t.cond, values):
                 return t, ""
         except cond.CondError as exc:
-            return None, f"{sid} 的条件 {t.cond!r} 求值失败: {exc}"
+            return None, f"guard {t.cond!r} of {sid} failed to evaluate: {exc}"
     return None, ""
 
 
 # --------------------------------------------------------------------------- #
-# 执行一个非 FALLBACK 状态
+# Execute a non-FALLBACK state
 # --------------------------------------------------------------------------- #
 def _phase_of_call(act, inp: dict, phase_rules: str, outputs: tuple) -> dict:
-    """这一步**实际在干什么**：从渲染后的入参正文现判，而不是照抄状态自己的声明。
+    """What this step is **actually doing**: classified on the spot from the rendered input body, not copied from the state's own declaration.
 
-    阶段是动作自身的属性，机器那侧有、记录这侧也必须有——``canon_action`` 两档都把它算进 KEY，
-    丢了回放第一步就对不上。但**来源**不能是状态的声明：状态说的是「这一步该是什么」，记录
-    要记的是「这一步是什么」。照抄会让编译变成循环——机器重新学到的只是它自己贴的标签。
+    The phase is a property of the action itself; the machine side has it, so the record side must have it too
+    -- ``canon_action`` includes it in the KEY at both levels, and without it replay would mismatch on the very
+    first step. But its **source** cannot be the state's declaration: the state says "what this step should be",
+    while the record has to capture "what this step is". Copying would make compilation circular -- the machine
+    would only relearn the labels it put on itself.
 
-    实测过后果：一个声明为 ``probe`` 的状态，模型给它写了一条 ``wb.save(...)`` 的命令，记录
-    照抄成 ``probe``；另一条只回读产出簿、本该是 ``verify``，也照抄成 ``probe``。一条 4 步的
-    轨迹里三步标错，而这些标签正是下一轮编译的身份依据。
+    The consequence has been observed: for a state declared as ``probe``, the model wrote a ``wb.save(...)``
+    command, and the record copied ``probe``; another step that only read back the output workbook and should
+    have been ``verify`` was also copied as ``probe``. Three of the four steps in one trace were mislabeled, and
+    those labels are exactly what the next compilation round uses as identity.
 
-    判据与外部日志那条路同源（:func:`hexis.traces.phases.classify`），所以两种来源的轨迹可比。
-    分类器给不出（专用工具、没登记规则）时退回状态的声明，行为与从前一致。
+    The criterion is shared with the external-log path (:func:`hexis.traces.phases.classify`), so traces from both
+    sources are comparable. When the classifier gives no answer (a dedicated tool, no registered rule), the
+    state's declaration is used, as before.
     """
     if phase_rules:
         got = _phases.classify(str(getattr(act, "name", "") or ""), inp, phase_rules,
@@ -370,9 +394,9 @@ def _phase_of_call(act, inp: dict, phase_rules: str, outputs: tuple) -> dict:
 
 def _run_action(state, values: dict, *, model, tools, phase_rules: str = "",
                 outputs: tuple = ()) -> tuple[dict, dict, str, int]:
-    """执行状态动作，返回 (记录用的 action, output, error, llm_calls_delta)。就地更新 values。
+    """Execute the state's action; returns (action for the record, output, error, llm_calls_delta). Updates values in place.
 
-    ``phase_rules``/``outputs`` 用来判**这一步实际在干什么**（见 :func:`_phase_of_call`）。
+    ``phase_rules``/``outputs`` are used to classify **what this step is actually doing** (see :func:`_phase_of_call`).
     """
     act = state.action
     kind = act.kind
@@ -380,7 +404,7 @@ def _run_action(state, values: dict, *, model, tools, phase_rules: str = "",
         inp = fill_template(act.input, values)
         ph = _phase_of_call(act, inp, phase_rules, outputs)
         if _normalize.is_begin(act):
-            # 开局工具：空操作。不问工具表——它是编译器垫的，任何工具表都不该认识它。
+            # begin tool: a no-op. Do not consult the tool table -- the compiler inserted it, and no tool table should know it.
             return {"kind": "tool", "name": act.name, "input": {}, **ph}, {}, "", 0
         try:
             out = tools.call(act.name, inp)
@@ -400,13 +424,13 @@ def _run_action(state, values: dict, *, model, tools, phase_rules: str = "",
                                    examples=tuple(e.model_dump() for e in act.examples))
         except Exception as exc:                                # noqa: BLE001
             return {"kind": "judge", "prompt": act.prompt}, {}, \
-                f"判断动作调用失败: {type(exc).__name__}: {exc}", 1
+                f"judge action call failed: {type(exc).__name__}: {exc}", 1
         values[act.writes[0]] = label
         return ({"kind": "judge", "prompt": act.prompt, "reads": act.reads},
                 {act.writes[0]: label}, "", 1)
     if kind == "model":
         vread = {k: values.get(k) for k in act.reads}
-        # 记模板 id + 模板 + reads + 摘要，不记渲染全文（题面已经在 vars 里）。见 _model_action。
+        # record template id + template + reads + digest, not the rendered text (the problem is already in vars). See _model_action.
         rec_act = _model_action(act.prompt, act.reads, vread, template_id=state.id)
         calls = 0
         try:
@@ -414,45 +438,45 @@ def _run_action(state, values: dict, *, model, tools, phase_rules: str = "",
                 out = model.generate(prompt=act.prompt, values=vread)
                 calls += 1
             except Exception as first:                          # noqa: BLE001
-                # 一次生成炸了（多半是思维链把预算吃光、答案为空）：同一状态原地再问一次，
-                # 比转回退枢纽从头重跑整台机器便宜得多。第二次还炸才按原逻辑报错。
+                # one generation blew up (most likely the chain of thought used up the budget and the answer is empty): ask the same
+                # state again in place, which is far cheaper than going to the fallback hub and rerunning the whole machine. Only a second failure is reported as before.
                 calls += 1
-                if "预算" not in str(first) and "JSON" not in str(first) and "timed out" not in str(first).lower():
+                if "budget" not in str(first) and "JSON" not in str(first) and "timed out" not in str(first).lower():
                     raise
                 out = model.generate(prompt=act.prompt, values=vread)
                 calls += 1
             got = rebuild(out, act.writes)
             if act.writes and not any(str(got.get(w) or "").strip() for w in act.writes):
-                # 回了合法 JSON 但没有一个声明的产出键（或全空）：把「缺哪些键」告诉模型再问一次。
-                # 这是解释器对格式失误的补救，不改状态的语义，也不替模型决定内容。
+                # valid JSON came back but without any declared output key (or all empty): tell the model which keys are missing and ask again.
+                # This is the interpreter repairing a format slip; it does not change the state's semantics or decide the content for the model.
                 out = model.generate(prompt=act.prompt + f"\n\nYour previous answer was a JSON object without the required "
                                      f"keys {list(act.writes)} (or with empty values). Return exactly one JSON object whose keys "
                                      f"are exactly {list(act.writes)}, each with non-empty content.", values=vread)
                 calls += 1
         except Exception as exc:                                # noqa: BLE001
             return rec_act, {}, \
-                f"生成动作调用失败: {type(exc).__name__}: {exc}", max(calls, 1)
+                f"generate action call failed: {type(exc).__name__}: {exc}", max(calls, 1)
         values.update(rebuild(out, act.writes))
         return rec_act, out, "", calls
     if kind == "user":
-        return {"kind": "user"}, {}, "密闭环境没有用户接口（user 动作不支持）", 0
-    return {"kind": kind}, {}, f"不认的动作类型 {kind}", 0
+        return {"kind": "user"}, {}, "the sealed environment has no user interface (user actions are not supported)", 0
+    return {"kind": kind}, {}, f"unknown action kind {kind}", 0
 
 
 # --------------------------------------------------------------------------- #
-# FALLBACK：解释执行一步
+# FALLBACK: interpret one step
 # --------------------------------------------------------------------------- #
-#: 解释模式回复里属于「控制」的键：它们说这一步**做什么**，不是这一步**产出**的值。
+#: keys of an interpreted-mode reply that are "control": they say **what** this step does, not the values it **produces**.
 _CONTROL_KEYS = frozenset({"kind", "name", "input", "reads", "writes", "output",
                            "values", "terminal", "prompt", "note", "thought",
                            "reason", "why"})
 
 
 def _payload(action: Mapping) -> dict:
-    """解释回复里模型自己产出的那部分值：优先 ``output``/``values``，否则取控制键之外的键。
+    """The values the model itself produced in an interpretation reply: ``output``/``values`` first, otherwise the keys outside the control keys.
 
-    两种写法都认，是因为「回一个 JSON 对象」这条约束下模型两种都会写；控制键的黑名单让
-    ``{"kind":"end","terminal":"done","answer":"42"}`` 这种扁平写法也能把答案摘出来。
+    Both forms are accepted because models write both under the "reply with one JSON object" constraint; the
+    control-key blocklist lets a flat form such as ``{"kind":"end","terminal":"done","answer":"42"}`` still yield the answer.
     """
     for key in ("output", "values"):
         v = action.get(key)
@@ -462,10 +486,11 @@ def _payload(action: Mapping) -> dict:
 
 
 def _history_item(rec: Any) -> Any:
-    """喂给解释的一条历史：**去掉 meta**。
+    """One history item fed to the interpreter: **with meta removed**.
 
-    ``meta`` 是执行侧的账（token、耗时、argv），与「已经做过什么」无关；``ModelAdapter`` 把
-    每条历史压到 800 字符，让记账去挤那点预算，等于拿宿主的实现细节换掉真正要看的动作与结果。
+    ``meta`` is execution-side accounting (tokens, latency, argv) and has nothing to do with "what has already
+    been done"; ``ModelAdapter`` truncates each history item to 800 characters, and letting the accounting eat
+    into that budget would trade the actions and results that matter for host implementation details.
     """
     if hasattr(rec, "model_dump"):
         d = rec.model_dump()
@@ -479,26 +504,28 @@ def _history_item(rec: Any) -> Any:
 
 def interpret_step(doc: str, values: dict, history: list, step: int, *,
                    model, tools) -> tuple[Record, bool, str]:
-    """FALLBACK 一步：模型读文档+历史+变量给下一动作，宿主执行并记录。
+    """One FALLBACK step: the model reads document + history + variables and gives the next action; the host executes and records it.
 
-    返回 ``(record, done, error)``。``done`` 表示动作是 end（该停机）。就地更新 values。
+    Returns ``(record, done, error)``. ``done`` means the action was end (the machine should stop). Updates values in place.
 
-    认四种动作：``tool``（宿主执行，结果由宿主填）、``model``（**这一趟 generate 本身**就是
-    那次生成，产出直接收下，不再问第二次）、``end``（可带最终答案）、其余一律记成「不认的动作
-    类型」并停。解释段能跑真动作、能交出答案，是为了让机器在结构还没编译出来时也能把题真的
-    做完——否则回退只是「优雅地放弃」，三臂实验里第一臂就没意义了。
+    Four kinds of action are accepted: ``tool`` (executed by the host, result filled in by the host), ``model``
+    (**this generate call itself** is that generation; its output is taken directly without asking a second
+    time), ``end`` (may carry a final answer), and anything else is recorded as an "unknown action kind" and
+    stops. The interpreted segment runs real actions and can submit an answer so that the machine can actually
+    finish the task before its structure has been compiled -- otherwise fallback would only be "giving up
+    gracefully", and the first arm of the three-arm experiment would be meaningless.
 
-    每步的 token/耗时进 ``Record.meta``（一步解释 = 一次模型调用）。
+    Each step's tokens/latency go into ``Record.meta`` (one interpreted step = one model call).
     """
     hist = tuple(_history_item(r) for r in history)
-    vread = dict(values)                    # 喂给这次解释的变量快照（提示词摘要按它算）
-    reads = sorted(vread, key=str)          # 解释一步把整张变量表都读进去了，如实记
+    vread = dict(values)                    # snapshot of the variables fed to this interpretation (the prompt digest uses it)
+    reads = sorted(vread, key=str)          # an interpreted step reads the whole variable table; record that faithfully
     u0 = _usage_of(model)
     t0 = time.perf_counter()
 
     def _rec(action: dict, output: Optional[dict] = None, *,
              argv: Optional[list] = None) -> Record:
-        """按当前 values 收一条记录，顺带结这一步的账。"""
+        """Build a record from the current values and settle this step's accounting."""
         return Record(step=step, state=FALLBACK, action=action,
                       output=dict(output or {}), vars=dict(values),
                       meta=_meta((time.perf_counter() - t0) * 1000.0, 1, u0,
@@ -509,12 +536,12 @@ def interpret_step(doc: str, values: dict, history: list, step: int, *,
     except Exception as exc:                                    # noqa: BLE001
         rec = _rec(_model_action(doc, reads, vread, template_id=FALLBACK,
                                  inline_template=False))
-        return rec, False, f"FALLBACK 解释调用失败: {type(exc).__name__}: {exc}"
+        return rec, False, f"FALLBACK interpretation call failed: {type(exc).__name__}: {exc}"
     kind = action.get("kind")
     if kind == "end":
-        # 终止可以带最终答案（``{"kind":"end","terminal":"done","answer":"42"}``）：数学机器的
-        # 回退段必须能**交卷**，答案落进 values 与 output，之后照常评判。没带就是空 dict，
-        # 记录形状与从前一模一样。
+        # end may carry a final answer (``{"kind":"end","terminal":"done","answer":"42"}``): the fallback segment of a
+        # math machine must be able to **submit**; the answer lands in values and output and is judged as usual. Without
+        # one it is an empty dict, and the record shape is exactly as before.
         answer = _payload(action)
         values.update(answer)
         rec = _rec({"kind": "end", "terminal": action.get("terminal", "done")}, answer)
@@ -537,10 +564,10 @@ def interpret_step(doc: str, values: dict, history: list, step: int, *,
     if kind == "model":
         produced = _payload(action)
         declared = action.get("writes")
-        # 与 tool 分支的差别是有意的：tool 的产出来自**宿主**，必须按模型声明的 writes 收，
-        # 否则工具能把一堆东西倒进变量表；model 的产出本来就是模型自己写的，再拿它自己的声明
-        # 去过滤它自己的产出买不到任何约束，只会在它忘了写 writes 时把这一步变成空转（然后
-        # 一路空转到步数上限）。所以：声明了按声明收，没声明就照单全收。
+        # the difference from the tool branch is intentional: tool output comes from the **host** and must be collected by the
+        # writes the model declared, otherwise a tool could dump anything into the variable table; model output is written by the
+        # model itself, so filtering it by its own declaration buys no constraint and only turns this step into a no-op when the
+        # model forgets writes (spinning all the way to the step limit). So: collect by the declaration if there is one, otherwise take everything.
         names = ([str(w) for w in declared] if isinstance(declared, (list, tuple))
                  else list(produced))
         values.update(rebuild(produced, names))
@@ -549,39 +576,43 @@ def interpret_step(doc: str, values: dict, history: list, step: int, *,
                    produced)
         return rec, False, ""
     rec = _rec({"kind": kind})
-    return rec, False, f"FALLBACK 解释给出不认的动作类型 {kind!r}"
+    return rec, False, f"FALLBACK interpretation gave an unknown action kind {kind!r}"
 
 
 # --------------------------------------------------------------------------- #
-# 跑一个任务
+# Run a task
 # --------------------------------------------------------------------------- #
-#: :func:`halt_at_fallback` 的哨兵：一个**不存在的**状态名。小写下划线，与真实状态名
-#: （``s1`` / ``FALLBACK`` / ``END_*``）不可能撞；真撞上会自动加后缀避开。
+#: sentinel for :func:`halt_at_fallback`: a state name that **does not exist**. Lowercase with underscores, so it cannot
+#: collide with real state names (``s1`` / ``FALLBACK`` / ``END_*``); if it ever did, a suffix is added to avoid it.
 HALT_SENTINEL = "__halt_at_fallback__"
 
 
 def halt_at_fallback(machine: Machine) -> Machine:
-    """返回一台等价副本，它**走到回退态就停机**，不切 :func:`interpret_step` 的解释循环。
+    """Return an equivalent copy that **stops when it reaches the fallback state** instead of switching to the :func:`interpret_step` loop.
 
-    ``run_task`` 只在 ``cur == machine.fallback`` 时切自带的解释执行；把 ``fallback`` 指到一个
-    不存在的状态名，控制流就正常落到那个回退状态**本身**，它的动作是 ``end``（空机器与编译
-    产物都如此），机器于是在那里干净停机，控制权回到调用方手上。
+    ``run_task`` only switches to its built-in interpreted execution when ``cur == machine.fallback``; pointing
+    ``fallback`` at a non-existent state name lets control flow reach the fallback state **itself** normally. Its
+    action is ``end`` (for the empty machine and compiled machines alike), so the machine stops cleanly there and
+    control returns to the caller.
 
-    三处要这件事，理由各不相同但都不希望 runtime 自己解释：臂三要回退段由与另两臂**同一个**
-    执行器续跑（否则「回退段花了多少」不可比）；一致性检查要看机器**自己**走到哪为止；
-    ``--no-fallback`` 要的是「进回退就停」。所以实现只留这一份。
+    Three places need this, for different reasons, but none of them wants runtime to interpret on its own: arm
+    three needs the fallback segment to be continued by **the same** executor as the other two arms (otherwise
+    "how much the fallback segment cost" is not comparable); the conformance check wants to see how far the
+    machine gets **on its own**; and ``--no-fallback`` means "stop on entering fallback". So there is only this
+    one implementation.
 
-    原机器一个字节不动；哨兵撞上真状态就加后缀——撞上而不避，那个状态会被当成回退态，
-    机器在那儿就地开始解释执行。
+    The original machine is left byte-for-byte untouched; if the sentinel collides with a real state, a suffix is
+    added -- colliding without avoiding it would make that state the fallback state, and the machine would start
+    interpreted execution right there.
     """
     name = HALT_SENTINEL
-    while name in machine.states:                           # 实际撞不上，但撞上后果严重
+    while name in machine.states:                           # never collides in practice, but a collision would be serious
         name += "_"
     return machine.model_copy(update={"fallback": name})
 
 
 def entry_of(machine: Machine, sid: str) -> str:
-    """一个工具状态的入口：专门给它生成参数的模型状态（唯一后继是它、写它模板里的变量），没有就是它自己。"""
+    """The entry of a tool state: the model state that generates its arguments (its only successor is the tool state and it writes variables of the tool's template); otherwise the state itself."""
     st = machine.states.get(sid)
     if st is None or st.action.kind != "tool":
         return sid
@@ -589,7 +620,7 @@ def entry_of(machine: Machine, sid: str) -> str:
     for gid, g in machine.states.items():
         if g.action.kind != "model" or getattr(g.action, "observable", False):
             continue
-        # 生成门自己可能挂着计数上限出口（cnt >= K → 回退态），那不算它的后继
+        # the generation gate may itself carry a counter-limit exit (cnt >= K -> fallback state); that is not a successor
         succ = [t.to for t in g.transitions
                 if not (t.to == machine.fallback and _COUNTER_EXIT_RE.match(t.cond or ""))]
         if succ == [sid] and need & set(g.action.writes):
@@ -600,25 +631,30 @@ def entry_of(machine: Machine, sid: str) -> str:
 def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
              max_steps: Optional[int] = None, on_error: str = "stop",
              retries: int = 0, interpret: bool = True) -> RunResult:
-    """跑一台机器完成一个任务，返回轨迹与停机原因。
+    """Run a machine to complete one task; returns the trace and the stop reason.
 
-    ``on_error="fallback"`` 时机器段某一步炸了（工具报错、模型调用失败）不再当场停机，而是转到
-    ``machine.fallback`` 交给解释段接着做——真实采集要的是这个：机器段学得还不全时，一次坏命令
-    不该让整趟运行报废，回退段照样能把题做完、判分、进 T+。默认 ``"stop"`` 保持旧语义
-    （密闭测试与三臂实验按它记 state_error）。解释段自己炸了一律停机，两档都一样。
+    With ``on_error="fallback"``, when a step of the machine segment blows up (tool error, failed model call) the
+    run no longer stops on the spot but moves to ``machine.fallback`` and the interpreted segment carries on --
+    this is what real data collection needs: while the machine segment is still incompletely learned, one bad
+    command should not waste the whole run; the fallback segment can still finish the task, be scored and go into
+    T+. The default ``"stop"`` keeps the old semantics (sealed tests and the three-arm experiment record
+    state_error with it). If the interpreted segment itself blows up, the run always stops, under both settings.
 
-    工作状态初值 = 任务输入的字段（供 FALLBACK 解释读取）叠加变量表的 init/init_from。
-    到达 ``machine.fallback`` 即切解释模式，并在 :class:`RunResult` 上记下**从哪个状态退进去
-    的、解释段跑了几步**（回退率与位置清单要的就是这两样）。每步的 token/耗时/argv 记进
-    ``Record.meta``，整趟的用量记在 :class:`RunResult` 上——测不到就留 ``None``。
+    Initial working state = the task input fields (for the FALLBACK interpretation to read) overlaid with the
+    variable table's init/init_from. Reaching ``machine.fallback`` switches to interpreted mode, and
+    :class:`RunResult` records **which state it fell back from and how many steps the interpreted segment ran**
+    (exactly the two things the fallback rate and position list need). Per-step tokens/latency/argv go into
+    ``Record.meta`` and whole-run usage into :class:`RunResult` -- if it cannot be measured, it stays ``None``.
 
-    **回退不是终结。** ``retries > 0`` 时回退态先是一个**重试枢纽**：每次进入，回到最近执行的
-    工具状态的入口（有生成门就回生成门，重新生成参数），把触发回退的计数变量清零，最多 ``retries``
-    次；重试用完才交给解释段（``interpret=True``）或停机（``stopped="fallback_exhausted"``）。
-    ``on_error="fallback"`` 时状态出错也走这个枢纽。
+    **Fallback is not the end.** With ``retries > 0`` the fallback state first acts as a **retry hub**: on each
+    entry it goes back to the entry of the most recently executed tool state (to the generation gate if there is
+    one, so the arguments are regenerated) and resets the counter variable that triggered the fallback, at most
+    ``retries`` times; only when the retries are used up does it hand over to the interpreted segment
+    (``interpret=True``) or stop (``stopped="fallback_exhausted"``). With ``on_error="fallback"`` state errors go
+    through this hub too.
     """
     task_input = task.get("input", {})
-    task_outputs = _phases.outputs_of(task_input)     # 产出由任务声明，不由分类器猜
+    task_outputs = _phases.outputs_of(task_input)     # outputs are declared by the task, not guessed by the classifier
     values: dict = dict(task_input)
     values.update(machine.initial_values(task_input))
     records: list[Record] = []
@@ -630,13 +666,13 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
     usage0 = _usage_of(model)
     fallback_steps = 0
     errors: list[str] = []
-    # 起点就是回退态（空机器）：没有「从哪退下来」可言，记它自己表示「全程解释」。
+    # the start is the fallback state (empty machine): there is no "where it fell back from"; record itself to mean "interpreted throughout".
     fallback_entry: Optional[str] = (machine.initial
                                      if machine.initial == machine.fallback else None)
     fallback_entry_step: Optional[int] = None
     retry_used = 0
-    last_tool: Optional[str] = None            # 最近执行过的工具状态
-    came_from: Optional[str] = None            # 这次进回退态是从哪个状态、经哪条边
+    last_tool: Optional[str] = None            # most recently executed tool state
+    came_from: Optional[str] = None            # which state, and which edge, this entry into the fallback state came from
     came_edge = None
 
     def result(stopped: str, error: str = "") -> RunResult:
@@ -653,7 +689,7 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
                          retries=retry_used)
 
     while step < limit:
-        # ---- FALLBACK：先当重试枢纽，重试用完再解释执行 / 停机 ---- #
+        # ---- FALLBACK: a retry hub first; once the retries are used up, interpret / stop ---- #
         if cur == machine.fallback and records and retry_used < retries:
             retry_used += 1
             frm = last_tool or came_from or machine.initial
@@ -674,7 +710,7 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
             continue
         if cur == machine.fallback and not interpret:
             return result(STOP_FALLBACK_EXHAUSTED,
-                          f"回退 {retry_used} 次重试用完，不交解释段（来自 {came_from or fallback_entry})")
+                          f"fallback used up {retry_used} retries, not handing over to the interpreted segment (from {came_from or fallback_entry})")
         if cur == machine.fallback:
             while step < limit:
                 step += 1
@@ -689,15 +725,15 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
                     return result(STOP_STATE_ERROR, f"{FALLBACK}: {err}")
                 if done:
                     return result(STOP_TERMINAL)
-            return result(STOP_MAX_STEPS, "FALLBACK 解释走了太多步还没停机")
+            return result(STOP_MAX_STEPS, "FALLBACK interpretation took too many steps without stopping")
 
         state = machine.states.get(cur)
         if state is None:
-            return result(STOP_STATE_ERROR, f"跳到不存在的状态 {cur!r}")
+            return result(STOP_STATE_ERROR, f"jumped to a non-existent state {cur!r}")
         step += 1
         t_step = time.perf_counter()
 
-        # ---- 终止动作 ---- #
+        # ---- end action ---- #
         if state.action.kind == "end":
             records.append(Record(step=step, state=cur, clause=state.clause,
                                   action={"kind": "end",
@@ -707,7 +743,7 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
                                              0, usage0, usage0)))
             return result(STOP_TERMINAL)
 
-        # ---- 普通动作 ---- #
+        # ---- ordinary action ---- #
         u_before = _usage_of(model)
         rec_action, output, err, dcalls = _run_action(
             state, values, model=model, tools=tools,
@@ -732,18 +768,18 @@ def run_task(machine: Machine, task: dict, *, model, tools, doc: str = "",
             cur = machine.fallback
             continue
 
-        # ---- 选边 ---- #
+        # ---- edge selection ---- #
         edge, eerr = pick_edge(machine, cur, values)
         if eerr:
             return result(STOP_STATE_ERROR, eerr)
         if edge is None:
-            return result(STOP_STUCK, f"{cur} 的出边一条都没成立，也没有兜底边")
+            return result(STOP_STUCK, f"none of the outgoing edges of {cur} holds, and there is no default edge")
         if edge.inc:
             values[edge.inc] = (values.get(edge.inc) or 0) + 1
         if edge.to == machine.fallback:
             came_from, came_edge = cur, edge
             if fallback_entry is None:
-                fallback_entry = cur             # 位置清单要的就是「从哪一状态退的」
+                fallback_entry = cur             # the position list needs exactly "which state it fell back from"
         cur = edge.to
 
-    return result(STOP_MAX_STEPS, f"走了 {limit} 步还没停机")
+    return result(STOP_MAX_STEPS, f"no stop after {limit} steps")

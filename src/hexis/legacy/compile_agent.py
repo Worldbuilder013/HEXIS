@@ -1,71 +1,93 @@
-"""算法 1「顺序转写编译」的**编译智能体**那一半。确定性守门程序是 :mod:`hexis.legacy.checker`。
+"""The **compile agent** half of Algorithm 1 ("sequential transcription compilation"). The deterministic
+gatekeeper is :mod:`hexis.legacy.checker`.
 
-:mod:`hexis.legacy.compiler` 是一台一次成型的编译器：整轮算完、整轮检查、不过就整轮撤销。
-一个**智能体式**的编译过程不是「一轮」，而是一串小提议——加个状态、接条边、把这个分岔收成
-判断动作、给这个环配个计数器。所以本模块不再自己动 :class:`~hexis.machine.schema.Machine`：它
-**只**通过 :class:`hexis.legacy.checker.Checker` 的八个受票接口改机器，一条提议一条回执，被拒
-的提议不牵连它之前被接受的提议。本模块因此**不 import**、也不需要 ``save_machine``。
+:mod:`hexis.legacy.compiler` is a one-shot compiler: it computes a whole round, checks the whole round and
+reverts the whole round if it fails. An **agentic** compilation is not "one round" but a series of small
+proposals -- add a state, connect an edge, turn this branch into a judge action, give this loop a counter.
+So this module no longer touches :class:`~hexis.machine.schema.Machine` itself: it changes the machine
+**only** through the eight receipt-issuing interfaces of :class:`hexis.legacy.checker.Checker`, one receipt
+per proposal, and a rejected proposal does not affect the proposals accepted before it. This module
+therefore does **not import** and does not need ``save_machine``.
 
-模型可以出现在哪里，以及不能出现在哪里
+Where the model may and may not appear
 --------------------------------------
-方法的核心主张是：**编译产物是确定性的，智能体的不确定性在编译期一次性付清**。所以模型只
-许出现在四处（:data:`MODEL_TOUCHPOINTS`）：
+The core claim of the method: **the compiled artifact is deterministic; the agent's nondeterminism is paid
+off once, at compile time**. So the model may appear in only four places (:data:`MODEL_TOUCHPOINTS`):
 
-(a) **新步 vs 重复**的语义判定（L6）；
-(b) **条款归属**（这一步落实文档哪一句）；
-(c) 分岔学不出确定条件时，**起草判断动作**的提问与标签集（L10，:func:`draft_judge`）；
-(d) 给那个判断动作**标定误差率**（:func:`hexis.legacy.fit.calibrate`）。
+(a) the semantic **new step vs repeat** decision (L6);
+(b) **clause attribution** (which sentence of the document this step implements);
+(c) when a branch has no learnable deterministic guard, **drafting a judge action**'s question and label
+    set (L10, :func:`draft_judge`);
+(d) **calibrating the error rate** of that judge action (:func:`hexis.legacy.fit.calibrate`).
 
-除此之外一律不碰模型：对齐、建状态、接边、成环、学分岔条件、算循环上限、支持度裁剪、验收
-——全是可复算的确定性计算。**每一次模型回复都过一遍模式检查**；解析不出来或不合模式的回复
-是一次 **REJECT，不是猜**。同一个点上连续两次被拒（模型回复不合模式，或守门程序拒了提议）
-就 :meth:`~hexis.legacy.checker.Checker.demote_to_fallback` 然后往下走——**宁可少编，不编错**。
+Everything else stays away from the model: alignment, building states, connecting edges, closing loops,
+learning branch guards, computing loop bounds, support pruning, acceptance -- all reproducible
+deterministic computation. **Every model reply goes through a schema check**; a reply that cannot be
+parsed or does not fit the schema is a **REJECT, not a guess**. Two consecutive rejections at the same
+point (the model reply does not fit the schema, or the gatekeeper rejects the proposal) trigger
+:meth:`~hexis.legacy.checker.Checker.demote_to_fallback`, and compilation moves on -- **better to compile
+less than to compile wrong**.
 
-``model=None`` 必须能跑（密闭自测走的就是这条路），此时退到确定性启发式：
+``model=None`` must work (the hermetic self-tests take exactly this path); it then falls back to
+deterministic heuristics:
 
-* 新步 vs 重复 —— 按规范化动作 KEY（:func:`hexis.traces.normalize.canon_action`，严档）判；
-* 条款归属 —— **一律留空**（归属是语义判断，没有模型就不假装有）；
-* 判断动作 —— **不起草**（轨迹里本来就有的判断步照常转写，那不是起草）。
+* new step vs repeat -- decided by the normalized action KEY
+  (:func:`hexis.traces.normalize.canon_action`, strict level);
+* clause attribution -- **always left empty** (attribution is a semantic judgement; without a model we do
+  not pretend to have one);
+* judge actions -- **not drafted** (judge steps already present in the traces are transcribed as usual;
+  that is not drafting).
 
-两趟，以及为什么必须是两趟
---------------------------
-守门程序的每个建边接口（``add_state`` 的 ``from_support``、``add_transition`` /
-``close_loop`` 的 ``support``）都要求**建边时就给出支持度**——八个接口里没有一个能事后给
-一条已有的边补记支持度。而 :func:`hexis.legacy.verify.verify_machine` 又要求每条非回退边的
-支持度 ≥ ``min_support``。于是「一边顺序走一边建边」在第一条轨迹上就会把所有边钉死在
-support=1，验收必挂、整批回滚。所以本模块把算法 1 拆成两趟，**决策的顺序仍然是轨迹的顺序**：
+Two passes, and why there must be two
+-------------------------------------
+Every edge-building interface of the gatekeeper (``from_support`` of ``add_state``, ``support`` of
+``add_transition`` / ``close_loop``) requires **support to be given when the edge is built** -- none of the
+eight interfaces can add support to an existing edge afterwards. And
+:func:`hexis.legacy.verify.verify_machine` requires every non-fallback edge to have support >=
+``min_support``. So "build edges while walking sequentially" would pin every edge at support=1 on the
+first trace: acceptance always fails and the whole batch is rolled back. This module therefore splits
+Algorithm 1 into two passes, **while the order of decisions is still the order of the traces**:
 
-* **第一趟 转写（**:func:`transcribe`**）** —— 按「步数少的优先」逐条轨迹、逐个动作走，
-  在一份*台账*上做算法 1 的 L3–L11 的全部**决策**（新步/重复/分岔、条款归属、判断标签、
-  访问次数、支持度）。这一趟**不改任何机器**，因此也不需要守门程序：它是智能体的思考。
-* **第二趟 落账（**:func:`apply_plan`**）** —— 把决策序列按原顺序翻成受票提议，带上最终的
-  支持度，逐条交给守门程序裁决。每条提议一张回执；连拒两次就在那个点退回解释执行。
+* **Pass 1, transcribe (**:func:`transcribe`**)** -- walk the traces "fewest steps first", action by
+  action, making all of Algorithm 1's L3-L11 **decisions** on a *ledger* (new step/repeat/branch, clause
+  attribution, judge labels, visit counts, support). This pass **changes no machine**, so it needs no
+  gatekeeper either: it is the agent's thinking.
+* **Pass 2, post (**:func:`apply_plan`**)** -- turn the decision sequence, in original order, into
+  receipt proposals carrying the final support, and hand them one by one to the gatekeeper for a ruling.
+  One receipt per proposal; two rejections in a row fall back to interpreted execution at that point.
 
-代价说在明处：第二趟里被拒的提议无法回过头去改第一趟的决策（例如互斥冲突要到落账才暴露）。
-这时走的是同一条退路——连拒两次 ⇒ ``demote_to_fallback``，那一段退回解释执行。
+The cost, stated openly: a proposal rejected in pass 2 cannot go back and change the decisions of pass 1
+(e.g. a mutual-exclusion conflict only surfaces when posting). The same escape route applies -- two
+rejections in a row => ``demote_to_fallback``, and that segment falls back to interpreted execution.
 
-回边为什么一定带条件
---------------------
-``Checker.close_loop`` 在源状态已有兜底边时**拒绝无条件回边**，而 ``add_state`` 建出来的
-状态天然带一条通往 FALLBACK 的兜底边——也就是说，受票接口下**建不出无条件回边**。这不是绕
-过去的坑，是它想要的形状：回边必须自带「什么时候该再绕一圈」的谓词，兜底位留给
-FALLBACK（绕不动了就退回解释执行）。所以本模块给每条回边学一个在该状态**所有观测快照上恒
-真**的谓词（:func:`hexis.legacy.fit.separating`，``others`` 为空），学不出就把这个环整个放弃。
+Why back edges always carry a guard
+-----------------------------------
+``Checker.close_loop`` **rejects an unguarded back edge** when the source state already has a default
+edge, and a state built by ``add_state`` naturally carries a default edge to FALLBACK -- in other words,
+**no unguarded back edge can be built** through the receipt interfaces. This is not a pitfall to work
+around but the intended shape: a back edge must carry its own predicate for "when to go round again", and
+the default slot is left to FALLBACK (when the loop cannot continue, fall back to interpreted execution).
+So this module learns, for each back edge, a predicate that is **always true on all observed snapshots**
+of that state (:func:`hexis.legacy.fit.separating`, with empty ``others``); if none can be learned, the
+whole loop is dropped.
 
-判断动作只在原地改写
---------------------
-L10 的「起草一个判断动作」在真实轨迹上有一条硬边界：回放
-（:func:`hexis.legacy.replay._action_matches`）逐步比动作，**凭空插一个判断状态**会让机器比
-轨迹多走一步，那条轨迹立刻复述不出来。所以本模块只在**这一步本来就是判断步**（``kind ==
-"judge"``）时才起草——改写它的提问与标签集，``writes`` 保持不动，松档 KEY 因此不变、回放照旧
-对得上。分岔落在工具步上而条件又学不出来，就是学不出来：整个分岔退回 FALLBACK。
+Judge actions are only rewritten in place
+-----------------------------------------
+L10's "draft a judge action" has a hard limit on real traces: replay
+(:func:`hexis.legacy.replay._action_matches`) compares actions step by step, and **inserting a judge state
+out of thin air** makes the machine take one more step than the trace, so that trace can no longer be
+replayed. So this module only drafts when **the step already is a judge step** (``kind == "judge"``) --
+rewriting its question and label set while keeping ``writes`` unchanged, so the loose KEY stays the same
+and replay still matches. A branch on a tool step whose guard cannot be learned simply cannot be learned:
+the whole branch falls back to FALLBACK.
 
-交付物
-------
-:class:`CompileResult` 除机器外还交出**覆盖报告**（``coverage``）：逐条款的支持/单薄/无轨迹
-触达，哪些结构来自文档、哪些是编译器自己加的（**循环上限 K 是编译器加的——SKILL.md 没写过
-任何圈数上限**），回退面有多大，以及再补哪些轨迹最值钱。``coverage`` 是结构化数据，
-:func:`hexis.legacy.report.render` 直接渲染得了。
+Deliverables
+------------
+Besides the machine, :class:`CompileResult` delivers a **coverage report** (``coverage``): per clause,
+supported / thin / not reached by any trace; which structures come from the document and which the
+compiler added itself (**the loop bound K is added by the compiler -- SKILL.md never states any iteration
+bound**); how large the fallback surface is; and which additional traces would be most valuable.
+``coverage`` is structured data that :func:`hexis.legacy.report.render` can render directly.
 """
 
 from __future__ import annotations
@@ -79,20 +101,26 @@ from typing import Any, Mapping, Optional, Sequence
 
 from pydantic import ValidationError
 
+from hexis.execution import runtime as _runtime
 from hexis.legacy import checker as _checker
-from hexis.machine import cond as _cond
 from hexis.legacy import compiler as _compiler
 from hexis.legacy import fit as _fit
 from hexis.legacy import replay as _replay
 from hexis.legacy import report as _report
-from hexis.execution import runtime as _runtime
 from hexis.legacy import verify as _verify
+from hexis.machine import cond as _cond
 from hexis.machine.checks import structural_findings
-from hexis.traces.normalize import canon_action, canon_tool_name
 from hexis.machine.schema import (
-    FALLBACK, JudgeAction, Machine, Thresholds, Trace, Variable,
+    ABSTAIN,
+    FALLBACK,
+    JudgeAction,
+    Machine,
+    Thresholds,
+    Trace,
+    Variable,
 )
 from hexis.skill_loader import markdown_clauses
+from hexis.traces.normalize import canon_action, canon_tool_name
 
 __all__ = [
     "ABSTAIN", "HARNESS_PRIMITIVES", "MAX_STRIKES", "MODEL_TOUCHPOINTS", "SKELETON_EXAMPLE",
@@ -101,42 +129,48 @@ __all__ = [
     "clause_rows", "compile_skill", "draft_judge", "markdown_clauses", "transcribe",
 ]
 
-#: 判断动作的弃权标签。全仓一致（见 :class:`hexis.machine.schema.JudgeAction`）。
-ABSTAIN = "弃权"
+#: The abstain label of judge actions. Consistent across the repository (see
+#: :class:`hexis.machine.schema.JudgeAction`).
 
-#: 同一个点上连续多少次被拒就退回解释执行。**宁可少编，不编错。**
+#: How many consecutive rejections at the same point fall back to interpreted execution.
+#: **Better to compile less than to compile wrong.**
 MAX_STRIKES = 2
 
-#: 模型**唯一**允许出现的几处。别处出现模型调用就是这套方法的自我否定。
-#: 前四处是单智能体编译器的；后三处是多智能体编译（hexis/agents）加的——同样过模式
-#: 检查、同样 REJECT 不猜，契约全部登记在 :data:`REGISTRY`，智能体只能经
-#: :class:`TouchpointGuard` 按登记的契约问模型。
+#: The **only** places where the model may appear. A model call anywhere else contradicts the method.
+#: The first four belong to the single-agent compiler; the rest were added for multi-agent
+#: compilation -- they pass the same schema check and the same REJECT-not-guess rule, all contracts are
+#: registered in :data:`REGISTRY`, and an agent may only ask the model through
+#: :class:`TouchpointGuard` according to the registered contract.
 MODEL_TOUCHPOINTS: tuple[str, ...] = (
-    "new_or_repeat",        # (a) L6 新步 vs 重复
-    "clause_attribution",   # (b) 这一步落实文档哪一条条款
-    "draft_judge",          # (c) L10 起草判断动作的提问与标签集
-    "calibrate_judge",      # (d) 给那个判断动作标定误差率
-    "introduce_judge",      # (e) 从文档条款引入一个判断动作（轨迹里本没有这一步）
-    "split_context",        # (f) 同一动作在两种前驱语境下是不是同一步
-    "annotate_judge",       # (g) 在线采集探针：按判断的问题给当前快照打标签
-    "draft_skeleton",       # (h) 文档 → 骨架机器（文档先行编译的第一步；轨迹随后在线标定）
-    "classify_clauses",     # (i) 流水线起草：一节条款逐条判「步骤 / 约束 / 跳过」与「谁做、哪个阶段」
+    "new_or_repeat",        # (a) L6 new step vs repeat
+    "clause_attribution",   # (b) which clause of the document this step implements
+    "draft_judge",          # (c) L10 draft the question and label set of a judge action
+    "calibrate_judge",      # (d) calibrate the error rate of that judge action
+    "introduce_judge",      # (e) introduce a judge action from a document clause (no such step in the traces)
+    "split_context",        # (f) whether the same action under two predecessor contexts is the same step
+    "annotate_judge",       # (g) online collection probe: label the current snapshot with the judge's question
+    "draft_skeleton",       # (h) document -> skeleton machine (first step of document-first compilation; traces calibrate it online later)
+    "classify_clauses",     # (i) pipeline drafting: classify each clause of a section as "step / constraint / skip" and "who does it, which phase"
 )
 
-#: 问条款归属时最多摆多少个候选标签（269 条条款全塞进标签集没有意义）。
+#: At most this many candidate labels when asking for clause attribution (putting all 269 clauses into
+#: the label set makes no sense).
 _CLAUSE_LABEL_CAP = 60
 
-#: 验收不过时最多修几轮（每轮把「肇事状态」退回解释执行再验一次）。
+#: At most this many repair rounds when acceptance fails (each round demotes the "offending states" to
+#: interpreted execution and verifies again).
 _MAX_REPAIR = 4
 
-_Q_NEW_OR_REPEAT = "这一步是流程里新的一步，还是回到之前已经走过的某一步？"
-_Q_CLAUSE = "这一步在落实技能文档的哪一条条款？拿不准就弃权。"
+_Q_NEW_OR_REPEAT = "Is this step a new step in the procedure, or a return to a step already taken earlier?"
+_Q_CLAUSE = "Which clause of the skill document does this step implement? If unsure, answer abstain."
 
-#: ``draft_skeleton`` 触点里给模型看的 **efsm-v1 格式说明**。原来的说明只说了规矩没说形状，
-#: 模型只能凭「efsm-v1」四个字猜字段名，猜错一个就过不了 Machine 校验，而这个触点只给一次
-#: 机会。样例是一台真机器：test_39 钉住它能过 Machine 校验与结构检查，说明因此不会与 schema
-#: 漂移。
-#: 机器里 tool 状态允许的**全部**名字：harness 的两个原语。不是工具库，起草时不接任何工具清单。
+#: The **efsm-v1 format description** shown to the model in the ``draft_skeleton`` touchpoint. The
+#: earlier description only stated the rules, not the shape, so the model had to guess field names
+#: from the word "efsm-v1"; one wrong guess fails Machine validation, and this touchpoint gets only
+#: one attempt. The example is a real machine that passes Machine validation and the structural
+#: checks, so the description does not drift from the schema.
+#: The **complete** set of names allowed for tool states in a machine: the two harness primitives.
+#: This is not a tool library; drafting does not take any tool list.
 HARNESS_PRIMITIVES: tuple[str, ...] = ("bash", "file_ops")
 
 SKELETON_EXAMPLE: dict = {
@@ -162,17 +196,17 @@ SKELETON_EXAMPLE: dict = {
                                {"to": "s2"}]},
         "s2": {"id": "s2", "clause": "S2",
                "action": {"kind": "model",
-                          "prompt": "按文档拟一份最小改动计划，并写出执行它的 shell 命令与回读核对的 shell 命令",
+                          "prompt": "Following the document, draft a minimal change plan and write the shell command that applies it and the shell command that reads the result back to check it",
                           "reads": ["content", "input_path", "output_path"],
                           "writes": ["plan", "apply_cmd", "verify_cmd"]},
                "transitions": [{"if": "repair_count >= 3", "to": "s7"},
                                {"to": "s3"}]},
         "s3": {"id": "s3", "clause": "S2",
-               "action": {"kind": "judge", "prompt": "这份计划的证据充分吗？拿不准就弃权。",
+               "action": {"kind": "judge", "prompt": "Is the evidence for this plan sufficient? If unsure, answer abstain.",
                           "reads": ["plan"], "writes": ["plan_conf"],
-                          "labels": ["充分", "不足", "弃权"], "abstain": "弃权"},
-               "transitions": [{"if": "plan_conf == '充分'", "to": "s4"},
-                               {"if": "plan_conf == '不足'", "to": "s2", "inc": "repair_count"},
+                          "labels": ["sufficient", "insufficient", "abstain"], "abstain": "abstain"},
+               "transitions": [{"if": "plan_conf == 'sufficient'", "to": "s4"},
+                               {"if": "plan_conf == 'insufficient'", "to": "s2", "inc": "repair_count"},
                                {"to": "FALLBACK"}]},
         "s4": {"id": "s4", "clause": "S2",
                "action": {"kind": "tool", "name": "bash", "phase": "apply",
@@ -199,68 +233,71 @@ SKELETON_EXAMPLE: dict = {
 }
 
 SKELETON_FORMAT = """\
-efsm-v1 的形状（JSON 对象）：
-- 顶层：format="efsm-v1"、skill_id、initial（起点状态 id）、fallback="FALLBACK"、max_steps、
-  states（id → 状态）、variables、terminals、audit_tools。
-- 状态：{id, clause, action, transitions, origin}。id 用 s1、s2…；clause 是它落实的条款 id。
-  origin 标这个状态**凭什么存在**："document" = 文档明确要求的一步（如"修改后必须回读核对"），
-  "compiler" = 你为了把流程编成机器而做的实现选择（如插一个"计划够不够"的判断、设一个重试上限）。
-  transitions 里每条边也可以带 origin，同一口径。后续用真实轨迹修正机器时，document 的部分是约束、
-  不许被绕过；compiler 的部分允许被改。拿不准就写 document。
-- action 四种，按 kind 区分：
-  tool  {name, phase, input, reads, writes}  执行一步。name 只能是 bash 或 file_ops：
-        bash     input={"command": "..."}，产出键 returncode / stdout；
-        file_ops input={"op": "read"|"write"|"list", "path": "...", "content"?: "..."}，读时产出键 content；
-        writes 里可以用**语义名**（如 workbook_content），这时加 binds={"stdout": "workbook_content"}
-        说明它由哪个产出键承载；不加 binds 的 writes 名必须就是产出键本身；
-        phase 是这一步的用途：probe（读输入看现状）/ apply（写产出）/ verify（回读自己刚写的核对）。
-        命令与路径里随任务变的部分写成 "${变量}"，由前面某个 model 状态产出；
-  model {prompt, reads, writes}       模型写一段内容，出参按 writes 收；
-  judge {prompt, reads, writes, labels, abstain}  固定提问、答案锁在 labels 里，labels 必含 "弃权"，
-        答案写进 writes 的那个变量，之后的分岔只读它；
-  end   {terminal}                    停机，terminal 指向 terminals 里的一项。
-- transitions：[{if, to, inc}]。if 是变量上的谓词，**只有**这几种写法：
-  x == 'A'、x != 'A'、n >= 3、n < 3、empty(x)、nonempty(x)，用中缀 and / or / not 连接，
-  例如 "returncode == 0 and empty(stdout)"。不是函数调用：and(...) 、&&、|| 一律非法；
-  只能引用 variables 里声明过的名字。没有 if 的是兜底边，一个状态至多一条、最后求值。
-  同一状态各出边必须两两互斥且覆盖全部取值。inc 是走这条边时 +1 的计数变量。
-- 回边（能绕回来的边）必须带 inc，且被绕回的那个状态要有一条 "计数 >= K" 的出口边。
-- variables：[{name, type, init | init_from}]，type ∈ string/integer/number/boolean/array/object；
-  任务输入用 init_from="task.input.<键>"，计数变量 init=0。每个状态读的变量在通往它的每条
-  路径上都要先被写过。
-- terminals：[{id, kind}]，kind ∈ verified / unverified / fallback。必须有 id 为 FALLBACK 的状态，
-  action 是 end、指向 kind=fallback 的终点；任何状态拿不准时都可以有一条边去 FALLBACK。
-- audit_tools：["bash"]。kind=verified 的终点只能经 phase=verify 的 bash 状态到达，且那条边的 if
-  要读它写出的 returncode。
-- phase_rules："default"。
-最小样例：
+Shape of efsm-v1 (a JSON object):
+- Top level: format="efsm-v1", skill_id, initial (id of the start state), fallback="FALLBACK", max_steps,
+  states (id -> state), variables, terminals, audit_tools.
+- State: {id, clause, action, transitions, origin}. Use ids s1, s2, ...; clause is the id of the clause it implements.
+  origin marks **why this state exists**: "document" = a step the document explicitly requires (e.g. "read back and check after modifying"),
+  "compiler" = an implementation choice you made to turn the procedure into a machine (e.g. inserting an "is the plan good enough" judge, setting a retry bound).
+  Each edge in transitions may also carry origin, with the same meaning. When the machine is later corrected with real traces, the document parts are
+  constraints and must not be bypassed; the compiler parts may be changed. If unsure, write document.
+- action has four kinds, distinguished by kind:
+  tool  {name, phase, input, reads, writes}  execute one step. name can only be bash or file_ops:
+        bash     input={"command": "..."}, output keys returncode / stdout;
+        file_ops input={"op": "read"|"write"|"list", "path": "...", "content"?: "..."}, a read yields output key content;
+        writes may use **semantic names** (e.g. workbook_content); then add binds={"stdout": "workbook_content"}
+        to say which output key carries it; without binds, every name in writes must be an output key itself;
+        phase is the purpose of the step: probe (read the input to see the current state) / apply (write the output) / verify (read back what you just wrote to check it).
+        The parts of commands and paths that vary per task are written as "${variable}", produced by some earlier model state;
+  model {prompt, reads, writes}       the model writes some content; outputs are collected according to writes;
+  judge {prompt, reads, writes, labels, abstain}  a fixed question whose answer is locked to labels; labels must include "abstain",
+        the answer is written to the variable in writes, and later branches read only that variable;
+  end   {terminal}                    halt; terminal refers to an entry in terminals.
+- transitions: [{if, to, inc}]. if is a predicate over variables, and **only** these forms are allowed:
+  x == 'A', x != 'A', n >= 3, n < 3, empty(x), nonempty(x), joined with infix and / or / not,
+  e.g. "returncode == 0 and empty(stdout)". These are not function calls: and(...), &&, || are all illegal;
+  only names declared in variables may be referenced. An edge without if is the default edge: at most one per state, evaluated last.
+  The outgoing edges of a state must be pairwise mutually exclusive and cover all values. inc is the counter variable incremented by 1 when the edge is taken.
+- A back edge (an edge that can loop back) must carry inc, and the state it loops back to must have an exit edge "counter >= K".
+- variables: [{name, type, init | init_from}], type in string/integer/number/boolean/array/object;
+  task inputs use init_from="task.input.<key>", counter variables use init=0. Every variable a state reads must be written first on every
+  path leading to that state.
+- terminals: [{id, kind}], kind in verified / unverified / fallback. There must be a state with id FALLBACK whose
+  action is end and points to a terminal with kind=fallback; any state that is unsure may have an edge to FALLBACK.
+- audit_tools: ["bash"]. A terminal with kind=verified can only be reached via a bash state with phase=verify, and the if of that edge
+  must read the returncode that state writes.
+- phase_rules: "default".
+Minimal example:
 """
 
 _JUDGE_PROMPT = """\
-你在把一份技能文档编译成状态机。状态 {state} 之后出现了一个分岔：同样的一步之后，
-执行有时走向 {targets}，而这些分支**无法**用现有变量上的确定性谓词分开。
+You are compiling a skill document into a state machine. A branch appears after state {state}: after the same step,
+execution sometimes goes to {targets}, and these branches **cannot** be separated by a deterministic predicate over the existing variables.
 
-请起草一次**固定提问**，让它的答案能决定该走哪一支。要求：
-1. 只读这些变量：{reads}；
-2. 答案锁死在一个有限标签集里，每个分支一个标签，另加一个弃权标签 {abstain}；
-3. 回一个 JSON 对象：{{"prompt": "...", "labels": ["...", ...], "abstain": "{abstain}"}}。
+Draft one **fixed question** whose answer decides which branch to take. Requirements:
+1. read only these variables: {reads};
+2. the answer is locked to a finite label set, one label per branch, plus an abstain label {abstain};
+3. reply with a JSON object: {{"prompt": "...", "labels": ["...", ...], "abstain": "{abstain}"}}.
 
-分岔两侧的变量快照样例：
+Sample variable snapshots from both sides of the branch:
 {samples}
 """
 
 
 # --------------------------------------------------------------------------- #
-# 触点登记表：每个触点的提问、reads 白名单、回复模式、REJECT 规则、model=None 退路
+# Touchpoint registry: per touchpoint, the question, reads whitelist, reply schema, REJECT rules,
+# and model=None fallback
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Touchpoint:
-    """一个模型触点的**全部**契约。智能体只能通过 :class:`TouchpointGuard` 按它问模型。
+    """The **complete** contract of one model touchpoint. An agent may only ask the model through
+    :class:`TouchpointGuard` according to it.
 
-    ``reads`` 是允许传给模型的值键白名单（交集规则，同 draft_judge 的 ``want = [...]``）；
-    ``parse(raw, values) -> dict | None`` 做模式检查，``None`` 即 REJECT；``fallback(values)``
-    是 ``model=None`` 时的确定性退路（``None`` 表示「不做」）；``allowed_ops`` 限定这个触点
-    的提案批里能出现哪些受票接口（空 = 不发提案，只写字段）。
+    ``reads`` is the whitelist of value keys that may be passed to the model (intersection rule, same as
+    ``want = [...]`` in draft_judge); ``parse(raw, values) -> dict | None`` performs the schema check,
+    ``None`` meaning REJECT; ``fallback(values)`` is the deterministic fallback for ``model=None``
+    (``None`` means "do nothing"); ``allowed_ops`` limits which receipt interfaces may appear in this
+    touchpoint's proposal batch (empty = no proposals, only fields are written).
     """
 
     id: str
@@ -292,11 +329,12 @@ def _parse_draft_judge(raw: Any, _values: Mapping) -> Optional[dict]:
 
 
 def _parse_introduce_judge(raw: Any, values: Mapping) -> Optional[dict]:
-    """``{clause_id, prompt, labels[2..9], abstain?, reads?, label_locators{label: locator}}``。
+    """``{clause_id, prompt, labels[2..9], abstain?, reads?, label_locators{label: locator}}``.
 
-    REJECT：非 Mapping；prompt 空；标签少于 2 或多于 9、有重复；``clause_id`` 不在给的
-    条款表里；给了 ``label_locators`` 却有标签没定位；``reads`` 越出白名单的部分被**丢弃**
-    （同 draft_judge：模型回一个白名单外的变量名，就是在给判断偷偷加上下文）。
+    REJECT: not a Mapping; empty prompt; fewer than 2 or more than 9 labels, or duplicates;
+    ``clause_id`` not in the given clause table; ``label_locators`` given but some label has no locator.
+    The part of ``reads`` outside the whitelist is **discarded** (as in draft_judge: a model replying
+    with a variable name outside the whitelist is sneaking extra context into the judge).
     """
     if not isinstance(raw, Mapping):
         return None
@@ -335,10 +373,11 @@ _PHASES = ("probe", "apply", "verify")
 
 
 def _parse_classify_clauses(raw: Any, values: Mapping) -> Optional[dict]:
-    """``{"items": [{clause_id, role, kind?, phase?, summary?}, ...]}``。
+    """``{"items": [{clause_id, role, kind?, phase?, summary?}, ...]}``.
 
-    不在条款表里的 id 丢弃；role 不在三值里丢弃；role=step 却缺 kind、或 kind=tool 却缺
-    phase 的条目丢弃。一条合法的都没有 ⇒ REJECT。没提到的条款由流水线按「约束」补。
+    Items whose id is not in the clause table are dropped; items whose role is not one of the three
+    values are dropped; items with role=step but no kind, or kind=tool but no phase, are dropped. No
+    valid item at all => REJECT. Clauses not mentioned are filled in by the pipeline as "constraint".
     """
     if isinstance(raw, str):
         try:
@@ -373,7 +412,7 @@ def _parse_classify_clauses(raw: Any, values: Mapping) -> Optional[dict]:
 
 
 def _parse_split_context(raw: Any, _values: Mapping) -> Optional[dict]:
-    if not isinstance(raw, str) or raw not in ("同一步", "不同步", ABSTAIN):
+    if not isinstance(raw, str) or raw not in ("same step", "different step", ABSTAIN):
         return None
     return {"label": raw}
 
@@ -381,82 +420,98 @@ def _parse_split_context(raw: Any, _values: Mapping) -> Optional[dict]:
 REGISTRY: dict[str, Touchpoint] = {
     "new_or_repeat": Touchpoint(
         "new_or_repeat", _Q_NEW_OR_REPEAT,
-        frozenset({"当前位置", "这一步", "同型的已有状态", "labels"}), "classify",
-        _parse_in_labels, ("回复不在标签集", "弃权"), None, MAX_STRIKES,
+        frozenset({"current position", "this step", "existing states of the same kind", "labels"}), "classify",
+        _parse_in_labels, ("reply not in label set", ABSTAIN), None, MAX_STRIKES,
         frozenset({"add_state", "add_transition", "close_loop", "set_terminal"})),
     "clause_attribution": Touchpoint(
-        "clause_attribution", _Q_CLAUSE, frozenset({"这一步", "候选条款", "labels"}),
-        "classify", _parse_in_labels, ("回复不在候选条款里",),
+        "clause_attribution", _Q_CLAUSE, frozenset({"this step", "candidate clauses", "labels"}),
+        "classify", _parse_in_labels, ("reply not among the candidate clauses",),
         lambda v: {"label": ""}, MAX_STRIKES, frozenset()),
     "draft_judge": Touchpoint(
         "draft_judge", _JUDGE_PROMPT,
         frozenset({"state", "reads", "targets", "abstain", "samples", "writes", "clause"}),
-        "generate", _parse_draft_judge, ("非 Mapping / prompt 空 / labels 少于 2",),
+        "generate", _parse_draft_judge, ("not a Mapping / empty prompt / fewer than 2 labels",),
         None, MAX_STRIKES, frozenset({"add_judge"})),
     "calibrate_judge": Touchpoint(
-        "calibrate_judge", "（判断动作自己的提问）", frozenset(), "classify",
+        "calibrate_judge", "(the judge action's own question)", frozenset(), "classify",
         lambda raw, v: ({"label": raw} if isinstance(raw, str) else None), (), None,
         MAX_STRIKES, frozenset()),
     "introduce_judge": Touchpoint(
         "introduce_judge",
-        "文档里哪一句要求在这一步做一次判定？给出固定提问、有限标签集（每个标签在该条款原文"
-        "里的定位）、只读这些变量。回一个 JSON 对象："
-        "{\"clause_id\": ..., \"prompt\": ..., \"labels\": [...], \"abstain\": \"弃权\", "
+        "Which sentence of the document requires a judgement at this step? Give a fixed question, a "
+        "finite label set (with each label's locator in the clause's original text) and the variables "
+        "it reads. Reply with a JSON object: "
+        "{\"clause_id\": ..., \"prompt\": ..., \"labels\": [...], \"abstain\": \"abstain\", "
         "\"reads\": [...], \"label_locators\": {label: locator}}",
         frozenset({"state", "clause_text", "clause_ids", "reads", "prev_action",
                    "next_actions", "samples"}),
         "generate", _parse_introduce_judge,
-        ("clause_id 不在条款表", "标签 <2 或 >9", "标签无原文定位", "reads 越出白名单"),
+        ("clause_id not in clause table", "labels <2 or >9", "label without a source locator",
+         "reads outside the whitelist"),
         None, 1, frozenset({"add_judge"})),
     "split_context": Touchpoint(
         "split_context",
-        "同一动作在这两种前驱语境下是不是同一步？回「同一步」/「不同步」/「弃权」。",
+        "Is the same action under these two predecessor contexts the same step? Reply "
+        "\"same step\" / \"different step\" / \"abstain\".",
         frozenset({"action", "pred_a", "pred_b", "sample_vars", "labels"}), "classify",
-        _parse_split_context, ("不在三个标签里",), None, MAX_STRIKES,
+        _parse_split_context, ("not one of the three labels",), None, MAX_STRIKES,
         frozenset({"split_state"})),
     "annotate_judge": Touchpoint(
-        "annotate_judge", "（判断动作自己的提问）", frozenset(), "classify",
-        _parse_in_labels, ("不在标签集 ⇒ 写弃权",), None, MAX_STRIKES, frozenset()),
+        "annotate_judge", "(the judge action's own question)", frozenset(), "classify",
+        _parse_in_labels, ("not in label set => write the abstain label",), None, MAX_STRIKES, frozenset()),
     "draft_skeleton": Touchpoint(
         "draft_skeleton",
-        "把这份技能文档转写成一台 efsm-v1 状态机（JSON）。规矩：每个状态挂一条条款（clause 用给定"
-        "的条款 id）；工具入参里凡是随任务变化的值一律写成 ${变量}，并让前面某个 model 状态"
-        "写出那个变量；分岔用变量条件或判断动作；回边配计数变量与上限；verified 终点只能经审计"
-        "工具到达。只回 JSON 对象。\n"
-        "不给你任何工具清单：tool 状态的 name 只能是 bash 或 file_ops 这两个原语，具体命令由"
-        "前面的 model 状态按文档现写。VARIABLES 里 clauses 是条款表（id → 原文）：每个状态的 clause"
-        "填它最贴近的那一条 id；一个状态可以覆盖多条条款，不必一条一个状态，也不要照抄样例的"
-        "状态数。不要在推理里逐条推演，想清主干就直接写 JSON。\n"
-        "若 VARIABLES 里带 previous 与 errors：previous 是你上一版机器，errors 是确定性检查对它"
-        "报的错；只修这些错，其余保持不动，仍回**完整**的机器 JSON。\n\n" + SKELETON_FORMAT
+        "Transcribe this skill document into an efsm-v1 state machine (JSON). Rules: attach one clause "
+        "to each state (clause uses the given clause ids); every tool input value that varies per task "
+        "is written as ${variable}, and some earlier model state must write that variable; branch on "
+        "variable guards or judge actions; give back edges a counter variable and a bound; verified "
+        "terminals can only be reached via audit tools. Reply with the JSON object only.\n"
+        "You are not given any tool list: the name of a tool state can only be one of the two "
+        "primitives bash or file_ops, and the concrete commands are written by earlier model states "
+        "following the document. In VARIABLES, clauses is the clause table (id -> original text): set "
+        "each state's clause to the id of the closest clause; one state may cover several clauses, "
+        "there is no need for one state per clause, and do not copy the number of states in the "
+        "example. Do not walk through the clauses one by one in your reasoning; once the main path is "
+        "clear, write the JSON directly.\n"
+        "If VARIABLES contains previous and errors: previous is your previous machine and errors are "
+        "the errors the deterministic checks reported on it; fix only those errors, keep everything "
+        "else unchanged, and still reply with the **complete** machine JSON.\n\n" + SKELETON_FORMAT
         + _json.dumps(SKELETON_EXAMPLE, ensure_ascii=False, indent=1),
         frozenset({"doc", "clause_ids", "clauses", "tool_names", "input_keys", "audit_tools",
                    "skill_id", "previous", "errors"}),
-        "generate", None, ("不是合法 efsm-v1", "结构检查有 error", "工具名不在允许集"),
+        "generate", None, ("not valid efsm-v1", "structural check reports an error",
+                           "tool name not in the allowed set"),
         None, 1, frozenset({"open_machine", "add_state", "add_transition", "close_loop",
                             "add_judge", "set_terminal"})),
     "classify_clauses": Touchpoint(
         "classify_clauses",
-        "下面是技能文档的一节，逐条条款判定。role 三选一：step（这一条要求执行一个动作）、"
-        "constraint（对怎么做的限定，不单独成一步）、skip（标题、背景、与执行无关）。role=step 时"
-        "再给 kind：tool（要跑命令或读写文件；再给 phase：probe=读输入看现状 / apply=写产出 / "
-        "verify=回读自己刚写的核对）、model（要想、要写内容、要拟计划）、judge（要在有限几种情形里"
-        "判定一种，之后走法不同）。按条款在文档里的顺序回。只回一个 JSON 对象："
+        "Below is one section of a skill document; classify each clause. role is one of three: step "
+        "(this clause requires performing an action), constraint (a restriction on how something is "
+        "done, not a step of its own), skip (heading, background, unrelated to execution). For "
+        "role=step also give kind: tool (runs a command or reads/writes files; also give phase: "
+        "probe=read the input to see the current state / apply=write the output / verify=read back "
+        "what you just wrote to check it), model (needs thinking, writing content or drafting a "
+        "plan), judge (decides which of a few finite cases applies, with different paths "
+        "afterwards). Reply in the order the clauses appear in the document. Reply with a single "
+        "JSON object only: "
         "{\"items\": [{\"clause_id\": ..., \"role\": ..., \"kind\": ..., \"phase\": ..., "
-        "\"summary\": \"十字以内\"}]}",
+        "\"summary\": \"at most ten words\"}]}",
         frozenset({"section", "clauses", "clause_ids", "primitives"}),
-        "generate", _parse_classify_clauses, ("items 不是列表", "没有一条合法条目"),
+        "generate", _parse_classify_clauses, ("items is not a list", "no valid item"),
         None, MAX_STRIKES, frozenset()),
 }
-# draft_skeleton 的 parse 需要 Machine 校验，定义在 agents/seed.py 里再回填，避免循环 import。
-assert tuple(REGISTRY) == MODEL_TOUCHPOINTS, "登记表与 MODEL_TOUCHPOINTS 必须逐项一致"
+# The parse of draft_skeleton needs Machine validation; it is filled in later by its user to avoid a
+# circular import.
+assert tuple(REGISTRY) == MODEL_TOUCHPOINTS, "registry and MODEL_TOUCHPOINTS must match item by item"
 
 
 class TouchpointGuard:
-    """智能体拿到的**唯一**模型句柄。每次提问都过白名单与模式检查，不合就记振、不猜。
+    """The **only** model handle an agent gets. Every question passes the whitelist and schema check;
+    a mismatch records a strike instead of guessing.
 
-    ``ask`` 返回解析后的 dict，REJECT 返回 ``None``（并已在 ``ctx`` 上对 ``point`` 记一振）；
-    ``model=None`` 时走触点的 ``fallback``（没有退路就 ``None``，什么都不做）。
+    ``ask`` returns the parsed dict, or ``None`` on REJECT (having already recorded a strike for
+    ``point`` on ``ctx``); with ``model=None`` it uses the touchpoint's ``fallback`` (``None`` when
+    there is none: do nothing).
     """
 
     def __init__(self, model: Any, ctx: "_Ctx", registry: Optional[Mapping] = None) -> None:
@@ -474,15 +529,15 @@ class TouchpointGuard:
             labels: Sequence[str] = (), history: tuple = ()) -> Optional[dict]:
         tp = self.registry.get(tp_id)
         if tp is None:
-            self.ctx.strike(point, f"触点 {tp_id!r} 没登记")
+            self.ctx.strike(point, f"touchpoint {tp_id!r} is not registered")
             return None
         vals = dict(values)
         if labels:
             vals["labels"] = list(labels)
         extra = set(vals) - set(tp.reads) - {"labels"}
         if tp.reads and extra:
-            self.ctx.strike(point, f"[E_READS_WHITELIST] 触点 {tp_id} 传了白名单外的值 "
-                                   f"{sorted(extra)}")
+            self.ctx.strike(point, f"[E_READS_WHITELIST] touchpoint {tp_id} passed values outside the "
+                                   f"whitelist {sorted(extra)}")
             self.rejects.append({"touchpoint": tp_id, "why": "reads", "extra": sorted(extra)})
             return None
         if self._model is None:
@@ -498,29 +553,30 @@ class TouchpointGuard:
             else:
                 raw = self._model.generate(prompt=tp.prompt, values=vals, history=history)
         except Exception as exc:                                    # noqa: BLE001
-            self.ctx.strike(point, f"触点 {tp_id} 调用失败：{type(exc).__name__}: {exc}")
+            self.ctx.strike(point, f"touchpoint {tp_id} call failed: {type(exc).__name__}: {exc}")
             return None
         parsed = tp.parse(raw, vals)
         if parsed is None:
-            self.ctx.strike(point, f"触点 {tp_id} 的回复不合模式：{str(raw)[:120]!r}")
+            self.ctx.strike(point, f"touchpoint {tp_id} reply does not fit the schema: {str(raw)[:120]!r}")
             self.rejects.append({"touchpoint": tp_id, "why": "schema", "raw": str(raw)[:200]})
             return None
         return parsed
 
 
 # --------------------------------------------------------------------------- #
-# 对外的数据形状
+# Public data shapes
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class Proposal:
-    """编译智能体的一条改写提议。
+    """One rewrite proposal from the compile agent.
 
-    ``op`` 是守门程序八个受票接口之一，``payload`` 是它的关键字参数，``rationale`` 是**这
-    条提议凭什么**（人读），``trace_id``/``step`` 指回它是从哪条轨迹的第几步学出来的——
-    审计一台机器时，这三样合起来回答「这条边凭哪条轨迹、哪条文档条款存在」。
+    ``op`` is one of the gatekeeper's eight receipt interfaces, ``payload`` its keyword arguments,
+    ``rationale`` **the justification for this proposal** (human-readable), and ``trace_id``/``step``
+    point back to the trace and step it was learned from -- when auditing a machine, these three together
+    answer "which trace and which document clause this edge exists because of".
 
-    本类与 :class:`hexis.legacy.checker.Proposal` 是两回事：那个是守门程序的入参形状（只有
-    ``op``/``args``），这个多带溯源。:meth:`to_checker` 做转换。
+    This class is not :class:`hexis.legacy.checker.Proposal`: that one is the gatekeeper's input shape
+    (only ``op``/``args``); this one additionally carries provenance. :meth:`to_checker` converts.
     """
 
     op: str
@@ -528,12 +584,13 @@ class Proposal:
     rationale: str = ""
     trace_id: str = ""
     step: int = 0
-    #: 溯源行（:class:`hexis.batch.Provenance` 或同形 dict）。多智能体模式下必带；
-    #: 单智能体旧路径不带，守门程序也不要求。
+    #: Provenance row (an object with ``to_dict()`` or a dict of the same shape). Required in
+    #: multi-agent mode; the old single-agent path omits it, and the gatekeeper does not require it.
     prov: Any = None
 
     def to_checker(self) -> _checker.Proposal:
-        """翻成守门程序认的提议形状。带溯源就一并交给受票接口的 ``prov=``。"""
+        """Convert to the proposal shape the gatekeeper accepts. Provenance, if present, is passed to
+        the receipt interface's ``prov=``."""
         args = dict(self.payload)
         if self.prov is not None and self.op not in ("commit", "mark", "rewind"):
             args["prov"] = (self.prov.to_dict() if hasattr(self.prov, "to_dict")
@@ -542,10 +599,12 @@ class Proposal:
 
     @property
     def point(self) -> str:
-        """这条提议**作用在哪个点**——连拒两次时退回解释执行的就是它。
+        """**The point this proposal acts on** -- the one demoted to interpreted execution after two
+        rejections in a row.
 
-        建边类提议的点是**边的源状态**（在那里编不下去了），没有源状态时才退而取被建的
-        状态本身。``open_machine``/``commit`` 不落在任何状态上，返回空串。
+        For edge-building proposals the point is **the edge's source state** (compilation got stuck
+        there); only when there is no source state does it fall back to the state being built.
+        ``open_machine``/``commit`` do not act on any state and return an empty string.
         """
         p = self.payload
         return str(p.get("from_state") or p.get("state_id") or "")
@@ -553,7 +612,8 @@ class Proposal:
 
 @dataclass
 class PlanResult:
-    """一趟落账的结果：回执、接受/拒绝计数、退回解释执行的点、被跳过的提议。"""
+    """Result of one posting pass: receipts, accepted/rejected counts, points demoted to interpreted
+    execution, skipped proposals."""
 
     receipts: list = field(default_factory=list)
     accepted: int = 0
@@ -564,7 +624,7 @@ class PlanResult:
 
 @dataclass
 class CompileResult:
-    """一次编译的全部交付物。``machine`` 是唯一的产物，其余都是它的账。"""
+    """All deliverables of one compilation. ``machine`` is the only artifact; the rest is its ledger."""
 
     machine: Machine
     receipts: list = field(default_factory=list)
@@ -576,7 +636,7 @@ class CompileResult:
 
 @dataclass(frozen=True)
 class ClauseRow:
-    """条款表的一行。``locator`` 形如 ``SKILL.md:12-20``，没有就是空串。"""
+    """One row of the clause table. ``locator`` looks like ``SKILL.md:12-20``; empty string if absent."""
 
     id: str
     title: str
@@ -585,16 +645,16 @@ class ClauseRow:
 
 
 # --------------------------------------------------------------------------- #
-# 第一趟的台账
+# The ledger of pass 1
 # --------------------------------------------------------------------------- #
 @dataclass
 class _PState:
-    """台账里的一个状态：一步动作 + 它的出身。"""
+    """A state in the ledger: one step's action plus its origin."""
 
     sid: str
     key: tuple
     kind: str                                   # tool / judge / model / end
-    payload: dict = field(default_factory=dict)  # tool/model 的动作 dict
+    payload: dict = field(default_factory=dict)  # action dict for tool/model
     clause: str = ""
     terminal: str = ""
     prompt: str = ""
@@ -602,26 +662,27 @@ class _PState:
     writes: list = field(default_factory=list)
     labels_seen: list = field(default_factory=list)
     examples: list = field(default_factory=list)   # [(label, {read: value})]
-    drafted: bool = False                          # 判断动作是不是模型起草的
+    drafted: bool = False                          # whether the judge action was drafted by the model
     error_rate: float = 0.0
     support: int = 0
     origin: tuple = ("", 0)                        # (trace_id, step)
-    # ---- 多智能体编译加的溯源与引入判断字段（默认空：单智能体产物逐字节不变） ---- #
-    introduced: bool = False                       # 从文档引入的判断（轨迹里本没有这一步）
-    gold_from: str = ""                            # 程序打标器名（trace_adapter.LABELERS）
-    origin_kind: str = ""                          # document / trace / compiler …
-    locator: str = ""                              # 条款原句位置
+    # ---- provenance and introduced-judge fields added for multi-agent compilation ---- #
+    # ---- (empty by default: single-agent output is byte-for-byte unchanged)         ---- #
+    introduced: bool = False                       # judge introduced from the document (no such step in the traces)
+    gold_from: str = ""                            # programmatic labeler name (trace_adapter.LABELERS)
+    origin_kind: str = ""                          # document / trace / compiler ...
+    locator: str = ""                              # location of the clause's original sentence
 
 
 @dataclass
 class _PEdge:
-    """台账里的一条边。``cond`` 在第二段「定条件」时才填上。"""
+    """An edge in the ledger. ``cond`` is filled in only in the second stage, "fixing guards"."""
 
     src: str
     dst: str
     support: int = 0
     back: bool = False
-    creating: bool = False                          # 这条边同时把目标状态建出来
+    creating: bool = False                          # this edge also creates its target state
     cond: str = ""
     counter: str = ""
     bound: int = 0
@@ -630,50 +691,54 @@ class _PEdge:
 
 @dataclass
 class Plan:
-    """第一趟转写的产物：一份**还没落到任何机器上**的编译台账。
+    """The product of the pass-1 transcription: a compile ledger **not yet applied to any machine**.
 
-    它是智能体的思考痕迹——状态、边、支持度、分岔处的变量快照、判断动作观测到的标签、每个
-    状态在单条轨迹里被进入的最大次数（定循环上限用）。第二趟据它生成受票提议。
+    It is the agent's trail of thought -- states, edges, support, variable snapshots at branches,
+    labels observed for judge actions, and the maximum number of times each state is entered within a
+    single trace (used to set loop bounds). Pass 2 generates receipt proposals from it.
     """
 
     skill_id: str = "compiled"
     states: dict = field(default_factory=dict)          # sid -> _PState
-    order: list = field(default_factory=list)           # 状态创建顺序
+    order: list = field(default_factory=list)           # state creation order
     by_key: dict = field(default_factory=lambda: defaultdict(list))
     edges: dict = field(default_factory=dict)           # (src,dst) -> _PEdge
     edge_order: list = field(default_factory=list)
     out: dict = field(default_factory=lambda: defaultdict(list))
     initial: str = ""
     obs: dict = field(default_factory=lambda: defaultdict(list))   # sid -> [(dst, snap)]
-    #: 与 obs 平行的语境账：sid -> [(dst, 前驱 sid, 进入 sid 前它在本条轨迹里已被访问的次数)]。
-    #: 分裂智能体靠它算「按前驱 / 按访问次数能不能把分岔分开」的列联表。单独一份而不是把
-    #: obs 的二元组撑成四元组：obs 的消费者（fit_guards/_unlink/_judge_branch）都按二元组解包。
+    #: Context ledger parallel to obs: sid -> [(dst, predecessor sid, number of times sid had already
+    #: been visited in this trace before entering it)]. The split agent uses it to build the contingency
+    #: table for "can the branch be separated by predecessor / by visit count". Kept separate instead of
+    #: widening obs's pairs into 4-tuples: obs's consumers (fit_guards/_unlink/_judge_branch) all unpack pairs.
     obs_ctx: dict = field(default_factory=lambda: defaultdict(list))
-    #: 分岔被退回 FALLBACK 时它原本的去处（_block 记下）：分裂 / 引入判断的智能体要知道
-    #: 「这个分岔本来分向哪几个状态」，而 _block 之后 out[p] 已经空了。
+    #: Where a branch originally led when it was sent to FALLBACK (recorded by _block): the split /
+    #: introduce-judge agents need to know "which states this branch originally split into", and after
+    #: _block out[p] is already empty.
     blocked_targets: dict = field(default_factory=dict)
-    #: sid -> 变量名：定这个状态的分岔条件时**只**看这个变量（引入的判断状态用它，让
-    #: learn_cond 学出的谓词一定是「判断变量 == 标签」，而不是碰巧也能分开的别的变量）。
+    #: sid -> variable name: when fixing this state's branch guards, look **only** at this variable
+    #: (used for introduced judge states, so the predicate learn_cond learns is always "judge variable
+    #: == label" and not some other variable that happens to separate the branches too).
     guard_vars: dict = field(default_factory=dict)
     visits: dict = field(default_factory=lambda: defaultdict(int))
     var_types: dict = field(default_factory=dict)
     input_keys: set = field(default_factory=set)
     trace_states: dict = field(default_factory=lambda: defaultdict(list))
-    blocked: set = field(default_factory=set)           # 分岔编不出来、只留兜底边的状态
-    thin: list = field(default_factory=list)            # 支持度不足、被裁掉的边
-    pruned: list = field(default_factory=list)          # 因此走不到、被剪掉的状态
-    loop_bounds: list = field(default_factory=list)     # K 的取值台账
-    notes: list = field(default_factory=list)           # 转写过程中说不下去的地方
+    blocked: set = field(default_factory=set)           # states whose branch could not be compiled; only the default edge remains
+    thin: list = field(default_factory=list)            # edges pruned for insufficient support
+    pruned: list = field(default_factory=list)          # states pruned because they became unreachable
+    loop_bounds: list = field(default_factory=list)     # ledger of K values
+    notes: list = field(default_factory=list)           # places where transcription could not proceed
     max_records: int = 0
     _n: int = 0
 
-    # ---- 便捷 ---- #
+    # ---- helpers ---- #
     def new_sid(self) -> str:
         self._n += 1
         return f"s{self._n}"
 
     def reaches(self, src: str, dst: str) -> bool:
-        """台账的图上 ``src`` 能不能走到 ``dst``（含 ``src is dst``）。"""
+        """Whether ``dst`` is reachable from ``src`` on the ledger graph (including ``src is dst``)."""
         seen, stack = {src}, [src]
         while stack:
             cur = stack.pop()
@@ -697,7 +762,7 @@ class Plan:
 
 
 # --------------------------------------------------------------------------- #
-# 编译上下文（模型触点 + 计数）
+# Compile context (model touchpoints + counters)
 # --------------------------------------------------------------------------- #
 @dataclass
 class _Ctx:
@@ -709,10 +774,11 @@ class _Ctx:
     model_calls: int = 0
     strikes: dict = field(default_factory=lambda: defaultdict(int))
     rejects: list = field(default_factory=list)
-    #: 状态身份的钩子：``key_of(rec, prev_rec, counts) -> tuple``。默认 ``None`` =
-    #: ``canon_action(rec, strict=True)``。多智能体的转写智能体用它把分裂智能体的
-    #: ``Refinement`` 落成「同一动作、不同前驱 / 不同访问次数 ⇒ 不同身份」，而不改转写循环。
-    #: ``counts`` 是本条轨迹内按基础 KEY 计数的 dict，钩子自己维护。
+    #: Hook for state identity: ``key_of(rec, prev_rec, counts) -> tuple``. Default ``None`` =
+    #: ``canon_action(rec, strict=True)``. The multi-agent transcription agent uses it to realize the
+    #: split agent's ``Refinement`` as "same action, different predecessor / different visit count =>
+    #: different identity" without changing the transcription loop.
+    #: ``counts`` is a dict of counts per base KEY within the current trace, maintained by the hook itself.
     key_of: Any = None
 
     def say(self, msg: str) -> None:
@@ -720,10 +786,11 @@ class _Ctx:
             print(f"[compile_agent] {msg}", file=sys.stderr)
 
     def strike(self, point: str, why: str) -> bool:
-        """在一个点上记一次拒绝。返回**是否已经连拒到上限**（该退回解释执行了）。"""
+        """Record one rejection at a point. Returns **whether the consecutive-rejection limit has been
+        reached** (time to fall back to interpreted execution)."""
         self.strikes[point] += 1
         self.rejects.append({"point": point, "why": why, "n": self.strikes[point]})
-        self.say(f"点 {point} 第 {self.strikes[point]} 次被拒：{why}")
+        self.say(f"point {point} rejected (#{self.strikes[point]}): {why}")
         return self.strikes[point] >= MAX_STRIKES
 
     def clear(self, point: str) -> None:
@@ -731,10 +798,10 @@ class _Ctx:
 
 
 # --------------------------------------------------------------------------- #
-# 模型触点（四处，每处都过模式检查；不合模式 = REJECT，不是猜）
+# Model touchpoints (four of them, each schema-checked; schema mismatch = REJECT, not a guess)
 # --------------------------------------------------------------------------- #
 def _brief(action: Mapping) -> str:
-    """一步动作的短摘要，喂给模型看。私有面的 prompt 全文不进这里。"""
+    """Short summary of a step's action, shown to the model. The full private prompt never goes in."""
     kind = str(action.get("kind") or "")
     if kind == "tool":
         return f"tool:{canon_tool_name(action.get('name') or '')}"
@@ -747,10 +814,10 @@ def _brief(action: Mapping) -> str:
 
 def _ask_new_or_repeat(ctx: _Ctx, point: str, rec: Any,
                        cands: Sequence[str]) -> Optional[str]:
-    """(a) 新步 vs 重复。返回 ``"new"`` / 某个已有状态 id；不合模式返回 ``None``。"""
-    labels = ["新步"] + [f"重复:{s}" for s in cands] + [ABSTAIN]
-    values = {"当前位置": point, "这一步": _brief(rec.action),
-              "同型的已有状态": ",".join(cands) or "（没有）"}
+    """(a) New step vs repeat. Returns ``"new"`` / an existing state id; ``None`` on schema mismatch."""
+    labels = ["new step"] + [f"repeat:{s}" for s in cands] + [ABSTAIN]
+    values = {"current position": point, "this step": _brief(rec.action),
+              "existing states of the same kind": ",".join(cands) or "(none)"}
     ctx.model_calls += 1
     try:
         ans = ctx.model.classify(prompt=_Q_NEW_OR_REPEAT, values=values,
@@ -759,13 +826,14 @@ def _ask_new_or_repeat(ctx: _Ctx, point: str, rec: Any,
         return None
     if not isinstance(ans, str) or ans not in labels or ans == ABSTAIN:
         return None
-    if ans == "新步":
+    if ans == "new step":
         return "new"
     return ans.split(":", 1)[1]
 
 
 def _clause_candidates(rec: Any, rows: Sequence[ClauseRow]) -> list[ClauseRow]:
-    """把候选条款先缩到一个能摆进标签集的范围。**这是检索，不是归属**——归属是模型的事。"""
+    """Narrow the candidate clauses down to a range that fits in a label set. **This is retrieval, not
+    attribution** -- attribution is the model's job."""
     act = rec.action if isinstance(rec.action, Mapping) else {}
     name = canon_tool_name(act.get("name") or "")
     hits = [r for r in rows if name and (name in r.text.lower()
@@ -776,15 +844,16 @@ def _clause_candidates(rec: Any, rows: Sequence[ClauseRow]) -> list[ClauseRow]:
 
 
 def _ask_clause(ctx: _Ctx, rec: Any) -> str:
-    """(b) 条款归属。``model=None`` 或不合模式一律返回空串（**不假装归属**）。"""
+    """(b) Clause attribution. ``model=None`` or a schema mismatch always returns an empty string
+    (**no pretend attribution**)."""
     if ctx.model is None or not ctx.rows:
         return ""
     pool = _clause_candidates(rec, ctx.rows)
     if not pool:
         return ""
     labels = [r.id for r in pool] + [ABSTAIN]
-    values = {"这一步": _brief(rec.action),
-              "候选条款": " | ".join(f"{r.id} {r.title}" for r in pool)}
+    values = {"this step": _brief(rec.action),
+              "candidate clauses": " | ".join(f"{r.id} {r.title}" for r in pool)}
     ctx.model_calls += 1
     try:
         ans = ctx.model.classify(prompt=_Q_CLAUSE, values=values, labels=list(labels))
@@ -796,17 +865,20 @@ def _ask_clause(ctx: _Ctx, rec: Any) -> str:
 
 
 def draft_judge(question_ctx: Mapping, *, model: Any) -> Optional[JudgeAction]:
-    """(c) 分岔学不出确定条件时，**智能体起草**一个判断动作；守门程序随后校验。
+    """(c) When a branch has no learnable deterministic guard, **the agent drafts** a judge action;
+    the gatekeeper validates it afterwards.
 
-    ``question_ctx`` 至少要给 ``reads``（允许读的变量白名单）与 ``targets``
-    （``{目标状态: [变量快照]}``），可给 ``state``/``writes``/``clause``。
+    ``question_ctx`` must provide at least ``reads`` (whitelist of variables that may be read) and
+    ``targets`` (``{target state: [variable snapshots]}``); it may provide ``state``/``writes``/``clause``.
 
-    返回 ``None`` 而不是抛异常的三种情形，都是**同一件事**——这次起草作废，调用方按一次
-    拒绝处理：没有模型；模型调用炸了；回复解析不出来或不合模式（缺 ``prompt``、标签少于
-    两个、标签不是标量）。**绝不拿半个回复凑一个判断动作**。
+    The three cases that return ``None`` instead of raising all mean **the same thing** -- this draft
+    is void and the caller treats it as one rejection: no model; the model call blew up; the reply cannot
+    be parsed or does not fit the schema (missing ``prompt``, fewer than two labels, non-scalar labels).
+    **Never assemble a judge action from half a reply.**
 
-    ``reads`` 只认白名单里的变量：模型回一个白名单外的变量名，就是在给这个判断动作偷偷加
-    上下文，而窄读正是这套编译要守住的东西。
+    ``reads`` accepts only whitelisted variables: a model replying with a variable name outside the
+    whitelist is sneaking extra context into this judge action, and narrow reads are exactly what this
+    compilation must protect.
     """
     if model is None:
         return None
@@ -860,12 +932,13 @@ def _sample_text(targets: Mapping, reads: Sequence[str]) -> str:
         for snap in list(targets[tgt])[:2]:
             vals = ", ".join(f"{k}={snap.get(k)!r}" for k in reads)
             lines.append(f"  → {tgt}: {vals}")
-    return "\n".join(lines) or "  （无）"
+    return "\n".join(lines) or "  (none)"
 
 
 def _calibrate(ctx: _Ctx, judge: JudgeAction,
                samples: Sequence[tuple]) -> Optional[float]:
-    """(d) 标定判断动作的误差率。标定不了返回 ``None``（调用方按拒绝处理）。"""
+    """(d) Calibrate the error rate of a judge action. Returns ``None`` if it cannot be calibrated
+    (the caller treats that as a rejection)."""
     if ctx.model is None or not samples:
         return None
     ctx.model_calls += len(samples)
@@ -876,7 +949,7 @@ def _calibrate(ctx: _Ctx, judge: JudgeAction,
 
 
 # --------------------------------------------------------------------------- #
-# 第一趟：顺序转写（算法 1 L2–L11 的决策）
+# Pass 1: sequential transcription (decisions of Algorithm 1, L2-L11)
 # --------------------------------------------------------------------------- #
 def _tid(trace: Trace) -> str:
     task = trace.task if isinstance(trace.task, dict) else {}
@@ -900,14 +973,15 @@ def _type_of(v: Any) -> Optional[str]:
 
 
 def _order_traces(t_plus: Sequence[Trace]) -> list[tuple[int, Trace]]:
-    """L2 的「步数少的优先」。同长度按 task_id、再按原下标，保证**顺序完全确定**。"""
+    """L2's "fewest steps first". Ties are broken by task_id, then by original index, so **the order is
+    fully deterministic**."""
     return sorted(enumerate(t_plus),
                   key=lambda it: (len(it[1].records), _tid(it[1]), it[0]))
 
 
 def _create_state(plan: Plan, sid: str, rec: Any, key: tuple, prev_vars: dict,
                   ctx: _Ctx, tid: str) -> _PState:
-    """L7：把一条记录的动作装成一个新状态（含条款归属、reads/writes）。"""
+    """L7: turn a record's action into a new state (including clause attribution and reads/writes)."""
     act = rec.action if isinstance(rec.action, Mapping) else {}
     kind = str(act.get("kind") or "")
     clause = _ask_clause(ctx, rec)
@@ -930,14 +1004,14 @@ def _create_state(plan: Plan, sid: str, rec: Any, key: tuple, prev_vars: dict,
         st.payload = {"kind": "model",
                       "prompt": str(act.get("prompt") or act.get("template") or ""),
                       "reads": list(st.reads), "writes": list(st.writes)}
-    else:                                              # tool（认不出的 kind 也当工具处理）
+    else:                                              # tool (an unrecognized kind is also treated as a tool)
         st.reads = _compiler._infer_reads(dict(act), prev_vars)
         st.writes = _compiler._infer_writes(dict(act), dict(rec.output or {}))
         st.payload = {"kind": "tool", "name": str(act.get("name") or ""),
                       "input": _compiler._templatize(dict(act.get("input") or {}),
                                                      prev_vars),
                       "reads": list(st.reads), "writes": list(st.writes)}
-        if act.get("phase"):            # 阶段随记录来，进状态、进 KEY（两侧对称）
+        if act.get("phase"):            # phase comes with the record and goes into the state and the KEY (symmetric on both sides)
             st.payload["phase"] = str(act["phase"])
     plan.states[sid] = st
     plan.order.append(sid)
@@ -947,32 +1021,35 @@ def _create_state(plan: Plan, sid: str, rec: Any, key: tuple, prev_vars: dict,
 
 def _resolve_target(plan: Plan, p: str, rec: Any, key: tuple, prev_vars: dict,
                     ctx: _Ctx, tid: str) -> tuple[Optional[str], bool]:
-    """L6–L9 的那个决定：这一步是**新的一步**，还是**回到已有的某一步**。
+    """The L6-L9 decision: is this step **a new step**, or **a return to an existing step**.
 
-    返回 ``(目标状态, 这次是不是新建的)``；这个点编不下去时返回 ``(None, False)``。
+    Returns ``(target state, whether it was newly created)``; returns ``(None, False)`` when
+    compilation cannot proceed at this point.
 
-    确定性档：规范化动作 KEY 撞上已有状态 ⇒ 重复，否则新步。给了模型就问模型
-    （:data:`MODEL_TOUCHPOINTS` 的 (a)），回复不合模式记一次拒绝、并退回确定性档；同一个点
-    连拒到上限就编不下去了。
+    Deterministic level: normalized action KEY matches an existing state => repeat, otherwise new step.
+    With a model, ask the model (touchpoint (a) of :data:`MODEL_TOUCHPOINTS`); a reply that does not fit
+    the schema records one rejection and falls back to the deterministic level; once the same point
+    reaches the rejection limit, compilation cannot proceed.
     """
-    # 只按后继对齐、不做全局查重的 KEY（文档骨架里的 model 状态折成 ("model",)：轨迹里
-    # 任何位置的模型步都"像"它，全局查重会把第一个模型步对到骨架里错的位置上；它们只在
-    # _step 的 L5（当前状态的后继）里对齐，这里一律当新步）。
+    # KEYs aligned only by successor, never deduplicated globally (model states in the document
+    # skeleton fold to ("model",): a model step anywhere in a trace "looks like" them, so global
+    # deduplication would align the first model step to the wrong place in the skeleton; they are aligned
+    # only in _step's L5 (successors of the current state) and are always treated as new steps here).
     local_only = set(getattr(ctx, "local_only_keys", ()) or ())
     cands = [] if key in local_only else list(plan.by_key.get(key, []))
     exact = _aligned_by_state(plan, p, rec, key)
     if exact is not None:
-        cands = [exact] + [c for c in cands if c != exact]  # 自报的状态优先
+        cands = [exact] + [c for c in cands if c != exact]  # the self-reported state comes first
     choice = cands[0] if cands else "new"
     if ctx.model is not None:
         ans = _ask_new_or_repeat(ctx, p, rec, cands)
         if ans is None:
-            if ctx.strike(p, "新步/重复的回复不合模式"):
+            if ctx.strike(p, "new step/repeat reply does not fit the schema"):
                 return None, False
         elif ans == "new" or ans in cands:
             choice = ans
             ctx.clear(p)
-        elif ctx.strike(p, f"模型指向不存在的状态 {ans!r}"):
+        elif ctx.strike(p, f"model points to a nonexistent state {ans!r}"):
             return None, False
     if choice == "new":
         sid = plan.new_sid()
@@ -982,7 +1059,8 @@ def _resolve_target(plan: Plan, p: str, rec: Any, key: tuple, prev_vars: dict,
 
 
 def _observe(plan: Plan, sid: str, rec: Any, tid: str) -> None:
-    """把这一步的观测累进台账：判断动作的标签与样例、变量类型、轨迹归属。"""
+    """Accumulate this step's observations into the ledger: judge labels and examples, variable types,
+    trace membership."""
     st = plan.states[sid]
     if tid and tid not in plan.trace_states[sid]:
         plan.trace_states[sid].append(tid)
@@ -1003,15 +1081,17 @@ def _observe(plan: Plan, sid: str, rec: Any, tid: str) -> None:
 def transcribe(t_plus: Sequence[Trace], *, ctx: Optional[_Ctx] = None,
                skill_id: str = "compiled", plan: Optional[Plan] = None,
                on_trace: Any = None, ordered: bool = True) -> Plan:
-    """**第一趟**：按 L2 的顺序（步数少的优先）逐条轨迹走完，出一份 :class:`Plan`。
+    """**Pass 1**: walk every trace in L2 order (fewest steps first) and produce a :class:`Plan`.
 
-    这一趟一个字节的机器都不改——它做的全是决策：对齐、新步/重复、分岔在哪、支持度多少、
-    判断动作见过哪些标签、每个状态在单条轨迹里最多被进入几次。
+    This pass does not change a single byte of any machine -- all it does is decide: alignment, new
+    step/repeat, where branches are, how much support, which labels judge actions have seen, and the
+    maximum number of times each state is entered within a single trace.
 
-    ``plan`` 给了就在它上面**继续**转写（文档骨架做种子、轨迹在线更新走的就是这条）；
-    ``on_trace(plan, trace, before, after)`` 每转写完一条轨迹调一次，``before/after`` 是转写
-    前后的 ``(状态数, 边数, 各边支持度之和)``——在线更新的逐条账靠它；``ordered=False`` 按给定
-    顺序喂（在线到达的顺序），不按步数重排。
+    If ``plan`` is given, transcription **continues** on it (the path used when a document skeleton is
+    the seed and traces update it online); ``on_trace(plan, trace, before, after)`` is called after each
+    trace, where ``before/after`` are ``(number of states, number of edges, sum of edge support)``
+    before and after -- the online per-trace ledger relies on it; ``ordered=False`` feeds the traces in
+    the given order (online arrival order) instead of re-sorting by step count.
     """
     ctx = ctx or _Ctx()
     plan = plan if plan is not None else Plan(skill_id=skill_id)
@@ -1037,7 +1117,7 @@ def _plan_size(plan: Plan) -> tuple[int, int, int]:
 
 
 def _transcribe_one(plan: Plan, trace: Trace, ctx: _Ctx) -> None:
-    """L3–L11：沿一条接受轨迹逐动作走。"""
+    """L3-L11: walk one accepted trace action by action."""
     recs = list(trace.records)
     if not recs:
         return
@@ -1047,14 +1127,14 @@ def _transcribe_one(plan: Plan, trace: Trace, ctx: _Ctx) -> None:
     visits: dict = defaultdict(int)
     prev_sid, prev_rec = "", None
     pprev_sid = ""
-    counts: dict = defaultdict(int)                 # 本条轨迹内按基础 KEY 的计数（供 key_of）
+    counts: dict = defaultdict(int)                 # counts per base KEY within this trace (for key_of)
 
     try:
         for i, rec in enumerate(recs):
             key = (ctx.key_of(rec, prev_rec, counts) if ctx.key_of is not None
                    else canon_action(rec, strict=True))
             prev_vars = dict(prev_rec.vars) if prev_rec is not None else dict(task_input)
-            if not prev_sid:                               # L3：起点
+            if not prev_sid:                               # L3: start
                 if not plan.initial:
                     sid = plan.new_sid()
                     _create_state(plan, sid, rec, key, prev_vars, ctx, tid)
@@ -1064,9 +1144,10 @@ def _transcribe_one(plan: Plan, trace: Trace, ctx: _Ctx) -> None:
                 else:
                     plan.notes.append({
                         "trace": tid, "step": i, "kind": "start_mismatch",
-                        "why": f"这条轨迹的起手动作 {_brief(rec.action)} 与已编译的起点 "
-                               f"{plan.initial} 不是同一步；一台机器只有一个起点，这套"
-                               "形状表达不了开局就分岔，整条轨迹不转写"})
+                        "why": f"the opening action {_brief(rec.action)} of this trace is not the same "
+                               f"step as the compiled start {plan.initial}; a machine has only one start, "
+                               "and this shape cannot express branching at the very beginning, so the "
+                               "whole trace is not transcribed"})
                     return
             else:
                 sid = _step(plan, prev_sid, rec, key, prev_vars, ctx, tid, i)
@@ -1075,31 +1156,37 @@ def _transcribe_one(plan: Plan, trace: Trace, ctx: _Ctx) -> None:
                 e = plan.edges[(prev_sid, sid)]
                 e.support += 1
                 plan.obs[prev_sid].append((sid, dict(prev_rec.vars)))
-                # 第 4 元是轨迹**对象**而不是 task_id：同一道题有多次运行，task_id 分不开它们，
-                # 打标器拿错运行就会给错标签（实测过：标签与后继对不上）。
+                # The 4th element is the trace **object**, not task_id: the same task may have several
+                # runs that task_id cannot tell apart, and a labeler given the wrong run produces wrong
+                # labels (observed in practice: labels did not match successors).
                 plan.obs_ctx[prev_sid].append((sid, pprev_sid, visits[prev_sid], trace, i - 1))
             visits[sid] += 1
             _observe(plan, sid, rec, tid)
             pprev_sid, prev_sid, prev_rec = prev_sid, sid, rec
     finally:
-        # 半路走不下去的轨迹，**它已经走过的那一段照样算数**：访问次数是循环上限 K 的
-        # 唯一依据，丢掉半条会让 K 偏小、把本来绕得完的环提前踢进 FALLBACK。
+        # For a trace that gets stuck halfway, **the part already walked still counts**: visit counts
+        # are the only basis for the loop bound K, and dropping half a trace would make K too small and
+        # push loops that could have finished into FALLBACK too early.
         for s, c in visits.items():
             plan.visits[s] = max(plan.visits[s], c)
 
 
 def _aligned_by_state(plan: Plan, p: str, rec: Any, key: tuple) -> Optional[str]:
-    """轨迹记录自报的状态 id，如果它在台账里且身份对得上，就是**精确**的对齐目标。
+    """The state id self-reported by the trace record is the **exact** alignment target, provided it is
+    in the ledger and its identity matches.
 
-    折叠过的身份会撞车：种子里的 model 状态一律折成 ``("model",)``（文档的私有 prompt 与
-    轨迹里模型说的话不可比，见 agents/seed.py），于是一个状态的回边与主干边如果都指向 model
-    状态，L5 按出边顺序取第一个就可能取到回边。实测：一条 17 步、走了三圈修复环的轨迹，整条
-    链塌回起点自环，分岔学不出条件、被堵，23 状态的骨架编成 2 状态。
+    Folded identities collide: model states in the seed all fold to ``("model",)`` (the document's
+    private prompt is not comparable to what the model said in a trace), so if both a state's back edge
+    and its main-path edge point to model states, L5, which takes the first outgoing edge in order, may
+    pick the back edge. Observed in practice: a 17-step trace that went round the repair loop three times
+    collapsed into a self-loop at the start, the branch guard could not be learned and was blocked, and a
+    23-state skeleton compiled into 2 states.
 
-    ``Record.state`` 是**执行侧如实记下的**「当时在哪个状态」，比折叠键精确。只在两个条件都
-    满足时用它：那个 id 在台账里存在，且它的身份与这一步算出来的身份一致——不然就是另一台
-    机器的状态名，一律忽略。外部 agent 日志没有这个字段（``to_trace`` 一律记 FALLBACK），
-    这条路自然不生效。
+    ``Record.state`` is **what the execution side faithfully recorded** as "the state at the time", which
+    is more precise than the folded key. It is used only when both conditions hold: the id exists in the
+    ledger, and its identity equals the identity computed for this step -- otherwise it is a state name
+    from another machine and is ignored. External agent logs lack this field (``to_trace`` always records
+    FALLBACK), so this path naturally does not apply.
     """
     sid = str(getattr(rec, "state", "") or "")
     if not sid or sid == FALLBACK:
@@ -1112,40 +1199,46 @@ def _aligned_by_state(plan: Plan, p: str, rec: Any, key: tuple) -> Optional[str]
 
 def _step(plan: Plan, p: str, rec: Any, key: tuple, prev_vars: dict,
           ctx: _Ctx, tid: str, step: int) -> Optional[str]:
-    """从 ``p`` 走一步：L5 对齐 / L6-L8 新步或成环 / L9 分岔。编不下去返回 ``None``。"""
+    """Take one step from ``p``: L5 alignment / L6-L8 new step or loop / L9 branch. Returns ``None``
+    when compilation cannot proceed."""
     if p in plan.blocked:
         return None
     exact = _aligned_by_state(plan, p, rec, key)
     if exact is not None and exact in plan.out.get(p, []):
-        return exact                                       # 记录自报的状态，且确实是 p 的后继
-    for dst in plan.out.get(p, []):                        # L5：同 KEY 的出边，直接前移
+        return exact                                       # state self-reported by the record, and indeed a successor of p
+    for dst in plan.out.get(p, []):                        # L5: outgoing edge with the same KEY, just advance
         if plan.states[dst].key == key:
             return dst
     target, created = _resolve_target(plan, p, rec, key, prev_vars, ctx, tid)
     if target is None:
         plan.blocked.add(p)
         plan.notes.append({"trace": tid, "step": step, "kind": "blocked",
-                           "state": p, "why": "同一个点连拒到上限，这一段退回解释执行"})
+                           "state": p, "why": "the same point reached the rejection limit; this "
+                                              "segment falls back to interpreted execution"})
         return None
-    back = (not created) and plan.reaches(target, p)        # L8：成环
+    back = (not created) and plan.reaches(target, p)        # L8: loop
     plan.add_edge(p, target, back=back, creating=created, origin=(tid, step))
     return target
 
 
 # --------------------------------------------------------------------------- #
-# 第一趟半：定条件（L9 的 fit.learn_cond / L10 的判断动作）
+# Pass 1.5: fixing guards (fit.learn_cond for L9 / judge actions for L10)
 # --------------------------------------------------------------------------- #
 def _plan_variables(plan: Plan) -> list[Variable]:
-    """台账推出来的变量表。三个来源：
+    """The variable table derived from the ledger. Three sources:
 
-    * **被某个状态写过的**；
-    * **任务输入的字段**（带 ``init_from``）；
-    * **计数变量**——边上的 ``inc`` 递增它、条件读它，但没有任何状态"写"它。文档骨架里的
-      ``repair_count`` 就是这样：只有初值，靠回边加一。漏了它，凡是读它的条件都会被守门程序
-      判「用到未声明的变量」，整批提案连坐（实测：不摘文档边之后，三批因此被拒）。
+    * variables **written by some state**;
+    * **task input fields** (with ``init_from``);
+    * **counter variables** -- an edge's ``inc`` increments them and guards read them, but no state
+      "writes" them. ``repair_count`` in a document skeleton is like that: it only has an initial value
+      and is incremented by back edges. Missing it, every guard that reads it is flagged by the
+      gatekeeper as "uses an undeclared variable" and the whole proposal batch is rejected with it
+      (observed in practice: once document edges were no longer removed, three batches were rejected
+      for this).
 
-    轨迹的 ``vars`` 里还有别的东西（产出这批轨迹的那台机器自己的计数变量之类），一律**不
-    收**：机器只认自己写得出来的变量，收了它们条件就会读一个永远没人写的名字。
+    A trace's ``vars`` also contain other things (e.g. the counter variables of the machine that
+    produced these traces); those are **never collected**: a machine only recognizes variables it can
+    write itself, and collecting them would make guards read a name nobody ever writes.
     """
     names: set[str] = set(plan.input_keys)
     for st in plan.states.values():
@@ -1163,16 +1256,18 @@ def _plan_variables(plan: Plan) -> list[Variable]:
 
 
 def _tighten(conds: dict, snaps: Mapping, variables: Sequence[Variable]) -> dict:
-    """把学出的条件**收紧到观测支持的最小形式**：``x != 'b'`` ⇒ ``x == 'a'``（若本支的
-    ``x`` 恒为 ``'a'``）。
+    """**Tighten** learned guards **to the minimal form supported by observations**: ``x != 'b'`` =>
+    ``x == 'a'`` (if ``x`` is always ``'a'`` on this branch).
 
-    两个理由，缺一不可：
+    Two reasons, both essential:
 
-    * **安全**。分岔外的格局（判断动作弃权那一格）本该落到兜底边、也就是 FALLBACK；留着
-      ``!=`` 形式会把「没见过的取值」也吞进某一支。宁可少编。
-    * **确定**。:func:`hexis.legacy.fit.candidate_atoms` 枚举字符串字面量时走的是一个
-      ``set``，同一批快照在不同进程里可能先给 ``==`` 也可能先给 ``!=``，学出的条件因此**跨
-      进程不稳定**。收紧到等值形式让两种搜索顺序收敛到同一个答案。
+    * **Safety**. Situations outside the branch (the cell where the judge action abstains) should land
+      on the default edge, i.e. FALLBACK; keeping the ``!=`` form would also swallow "values never
+      seen" into some branch. Better to compile less.
+    * **Determinism**. :func:`hexis.legacy.fit.candidate_atoms` enumerates string literals through a
+      ``set``, so for the same snapshots different processes may yield ``==`` first or ``!=`` first,
+      making learned guards **unstable across processes**. Tightening to the equality form makes both
+      search orders converge on the same answer.
     """
     out = dict(conds)
     for tgt in list(out):
@@ -1204,9 +1299,10 @@ def _tighten(conds: dict, snaps: Mapping, variables: Sequence[Variable]) -> dict
 
 
 def _always_guard(snaps: Sequence[dict], variables: Sequence[Variable]) -> Optional[str]:
-    """给一条**回边**学一个「在这个状态的全部观测快照上恒真」的谓词。学不出返回 ``None``。
+    """Learn, for a **back edge**, a predicate that is "always true on all observed snapshots of this
+    state". Returns ``None`` if none can be learned.
 
-    为什么回边非要有条件：见模块文档「回边为什么一定带条件」。
+    Why back edges must have a guard: see the module docs, "Why back edges always carry a guard".
     """
     if not snaps:
         return None
@@ -1218,10 +1314,12 @@ def _always_guard(snaps: Sequence[dict], variables: Sequence[Variable]) -> Optio
 
 
 def _judge_branch(plan: Plan, p: str, snaps: Mapping, ctx: _Ctx) -> Optional[dict]:
-    """L10：分岔学不出确定条件时，起草一个判断动作，用它的裁决变量当条件。
+    """L10: when a branch has no learnable deterministic guard, draft a judge action and use its
+    verdict variable as the guard.
 
-    **只在这一步本来就是判断步时才做**（见模块文档「判断动作只在原地改写」）：凭空插一个
-    判断状态会让机器比轨迹多走一步，那条轨迹立刻复述不出来，得不偿失。
+    **Only done when the step already is a judge step** (see the module docs, "Judge actions are only
+    rewritten in place"): inserting a judge state out of thin air makes the machine take one more step
+    than the trace, so that trace can no longer be replayed -- not worth it.
     """
     st = plan.states.get(p)
     if st is None or st.kind != "judge" or ctx.model is None:
@@ -1231,22 +1329,22 @@ def _judge_branch(plan: Plan, p: str, snaps: Mapping, ctx: _Ctx) -> Optional[dic
                          "targets": {t: list(v) for t, v in snaps.items()},
                          "clause": st.clause}, model=ctx.model)
     if judge is None:
-        ctx.strike(p, "判断动作起草失败或回复不合模式")
+        ctx.strike(p, "judge action drafting failed or the reply does not fit the schema")
         return None
     usable = [l for l in judge.labels if l != judge.abstain]
     targets = list(snaps)
     if len(usable) < len(targets):
-        ctx.strike(p, f"起草的标签集只有 {len(usable)} 个非弃权标签，盖不住 "
-                      f"{len(targets)} 个分支")
+        ctx.strike(p, f"the drafted label set has only {len(usable)} non-abstain labels, not enough "
+                      f"for {len(targets)} branches")
         return None
     assign = {t: usable[i] for i, t in enumerate(targets)}
     samples = [(dict(s), assign[t]) for t in targets for s in snaps[t]]
     rate = _calibrate(ctx, judge, samples)
     if rate is None:
-        ctx.strike(p, "判断动作标定不了误差率")
+        ctx.strike(p, "cannot calibrate the judge action's error rate")
         return None
     if rate > ctx.thresholds.judge_err_max:
-        ctx.strike(p, f"标定误差率 {rate} > 上限 {ctx.thresholds.judge_err_max}")
+        ctx.strike(p, f"calibrated error rate {rate} > bound {ctx.thresholds.judge_err_max}")
         return None
     st.prompt = judge.prompt
     st.labels_seen = [l for l in judge.labels if l != judge.abstain]
@@ -1261,46 +1359,60 @@ def _judge_branch(plan: Plan, p: str, snaps: Mapping, ctx: _Ctx) -> Optional[dic
 
 
 def _drop_thin(plan: Plan, min_support: int) -> None:
-    """L14 的前半：支持度不足的边整条拿掉，只被它们够得着的状态一并剪掉——退回解释执行。"""
+    """First half of L14: remove edges with insufficient support entirely, and prune the states only
+    they could reach -- those fall back to interpreted execution."""
     for kk in list(plan.edge_order):
         e = plan.edges[kk]
         if e.support >= min_support:
             continue
         if e.origin and e.origin[0] == "document":
-            # 文档骨架的边、轨迹没走到：**留着**。它不是「把偶然当规律」，是「文档要求、轨迹
-            # 尚未观测」——两者的处置必须不同。摘掉等于让机器只会做已经见过的那几条路，文档
-            # 写了而这批轨迹恰好没走到的分支（错误处理、边界情形）会在产物里整段消失。
+            # An edge of the document skeleton that no trace walked: **keep it**. This is not "taking
+            # chance for a rule" but "required by the document, not yet observed in traces" -- the two
+            # must be handled differently. Removing it would leave the machine able to do only the paths
+            # already seen; branches the document describes but this batch of traces happened not to
+            # take (error handling, edge cases) would vanish from the artifact entirely.
             #
-            # 代价是支持度门槛：这条边 support=0，拿它去过 min_support 必然不过，而验收不过会
-            # 让 _settle 从**源状态**退回 FALLBACK，把已经对上轨迹的主干一起带走（实测：整台
-            # 机器塌成 begin→FALLBACK）。所以门槛那侧要一起豁免——见 checker._support_rows：
-            # 支持度要求的是「被编译下来的那条路有证据」，文档边本来就不是从轨迹编下来的。
+            # The cost is the support threshold: this edge has support=0 and can never pass
+            # min_support, and a failed acceptance makes _settle demote from the **source state** to
+            # FALLBACK, taking along the main path that already matched the traces (observed in practice:
+            # the whole machine collapsed into begin->FALLBACK). So the threshold side must exempt it too
+            # -- see checker._support_rows: support requires "evidence for the compiled path", and
+            # document edges were never compiled from traces in the first place.
             plan.notes.append({"kind": "doc_unobserved", "edge": f"{e.src}->{e.dst}",
                                "cond": e.cond, "support": e.support,
-                               "why": "文档骨架里的这条边在本批轨迹里没被走过：**照样留在产物里**"
-                                      "（文档的主张不因没被观测到就消失），但记在这一栏里——"
-                                      "再补轨迹时它是最值钱的目标之一"})
+                               "why": "this edge of the document skeleton was not walked by this batch "
+                                      "of traces: **it stays in the artifact anyway** (a document's "
+                                      "claim does not vanish just because it was not observed), but it "
+                                      "is recorded here -- it is one of the most valuable targets when "
+                                      "adding traces"})
             continue
         plan.thin.append({"edge": f"{e.src}->{e.dst}", "support": e.support,
                           "min_support": min_support,
-                          "why": "只凭这么少的轨迹就编译下来，是在把偶然当规律；"
-                                 "这条分支退回解释执行"})
+                          "why": "compiling this from so few traces would take chance for a rule; "
+                                 "this branch falls back to interpreted execution"})
         _unlink(plan, kk)
     _prune(plan)
-    # 转写时的「回边」是按当时图上能不能绕回来判的。文档骨架带着一批 support=0 的回路
-    # （s4→s2 修复环），轨迹从 s2 直走 s4 时看起来是在成环，于是被记成回边；上面把那些文档边
-    # 摘掉之后它根本绕不回来了，再当回边去学「什么时候该再绕一圈」只会学不出、把 s2 整个堵死
-    # （实测：文档骨架 + 4 条直线轨迹编出一台只有起点的机器）。只降不升：真回路照旧。
+    # During transcription, "back edge" was decided by whether the graph at that time could loop back.
+    # A document skeleton brings a set of support=0 loops (the s4->s2 repair loop), so a trace going
+    # straight from s2 to s4 looked like closing a loop and was recorded as a back edge; once those
+    # document edges are removed above it can no longer loop back at all, and learning "when to go round
+    # again" for it would only fail and block s2 entirely (observed in practice: document skeleton + 4
+    # linear traces compiled into a machine with only a start). Only demote, never promote: real loops
+    # stay as they are.
     for e in plan.edges.values():
         if e.back and not plan.reaches(e.dst, e.src):
             e.back = False
             plan.notes.append({"kind": "back_edge_demoted", "edge": f"{e.src}->{e.dst}",
-                               "why": "转写时靠文档边才成环；那些边没被轨迹走过、已摘掉，"
-                                      "这条边现在是前向边"})
-    # 同一个来源的第二个坑：落账只给「有创建边或是起点」的状态发提案。骨架里 s4 的创建边是
-    # 文档边 s3→s4；轨迹从 s2 直接走到 s4 时 s4 已存在，那条边记成 creating=False。文档边摘掉
-    # 后 s4 就没有创建边，整个状态连同它后面的主干都落不下去（实测：state:s5 被拒「引用了不
-    # 存在的状态 s4」）。补法：还留着入边的状态若没有创建边，把它最早的那条前向入边升为创建边。
+                               "why": "during transcription this edge only formed a loop through "
+                                      "document edges; those were not walked by traces and have been "
+                                      "removed, so this edge is now a forward edge"})
+    # A second pitfall from the same source: posting only issues proposals for states that "have a
+    # creating edge or are the start". In the skeleton, s4's creating edge is the document edge s3->s4;
+    # when a trace walks straight from s2 to s4, s4 already exists and that edge is recorded with
+    # creating=False. Once the document edge is removed, s4 has no creating edge, and the whole state plus
+    # the main path after it cannot be posted (observed in practice: state:s5 was rejected for
+    # "referencing nonexistent state s4"). Fix: if a state that still has incoming edges has no creating
+    # edge, promote its earliest forward incoming edge to the creating edge.
     creators = {kk[1] for kk in plan.edge_order if plan.edges[kk].creating}
     for sid in plan.order:
         if sid == plan.initial or sid in creators:
@@ -1314,8 +1426,9 @@ def _drop_thin(plan: Plan, min_support: int) -> None:
         creators.add(sid)
         plan.notes.append({"kind": "creator_reanchored", "state": sid,
                            "edge": f"{pick[0]}->{pick[1]}",
-                           "why": "原来的创建边是文档边、没被轨迹走过、已摘掉；改由这条有轨迹"
-                                  "支持的入边创建它"})
+                           "why": "the original creating edge was a document edge that no trace "
+                                  "walked and has been removed; this trace-supported incoming edge "
+                                  "creates the state instead"})
 
 
 def _unlink(plan: Plan, kk: tuple) -> None:
@@ -1328,7 +1441,8 @@ def _unlink(plan: Plan, kk: tuple) -> None:
 
 
 def _prune(plan: Plan) -> None:
-    """从起点顺着**还留着的**边重算可达，走不到的状态与边一起剪掉。"""
+    """Recompute reachability from the start along the edges **still present**; prune unreachable
+    states together with their edges."""
     if not plan.initial:
         return
     seen, stack = {plan.initial}, [plan.initial]
@@ -1355,10 +1469,11 @@ def _prune(plan: Plan) -> None:
 
 
 def _avail_map(plan: Plan) -> dict:
-    """每个状态**进入时**一定已被写过的变量（按路径取交集）。
+    """Variables guaranteed to have been written **on entry** to each state (intersection over paths).
 
-    与 :func:`hexis.machine.checks._write_before_read` 同一条判据：并集问「有没有一条路让它
-    存在」，交集问「是不是每条路都让它存在」。只有后者能保证运行时不撞未定义变量。
+    Same criterion as :func:`hexis.machine.checks._write_before_read`: the union asks "is there a path
+    on which it exists", the intersection asks "does it exist on every path". Only the latter guarantees
+    that no undefined variable is hit at run time.
     """
     seed = set(plan.input_keys)
     universe = set(seed)
@@ -1389,7 +1504,8 @@ def _avail_map(plan: Plan) -> dict:
 
 
 def _template_vars(payload: Any) -> list[str]:
-    """台账里某个 tool 状态的入参模板引用了哪些变量。判据与 checks.template_vars 同源。"""
+    """Which variables the input template of a tool state in the ledger references. Same criterion as
+    checks.template_vars."""
     if not isinstance(payload, Mapping):
         return []
     from hexis.machine.checks import template_vars
@@ -1397,22 +1513,27 @@ def _template_vars(payload: Any) -> list[str]:
 
 
 def _prune_reads(plan: Plan, avail: dict) -> None:
-    """把每个状态的 ``reads`` 收到「走到它时一定已写过」的范围内。
+    """Narrow each state's ``reads`` to what is "guaranteed written when reaching it".
 
-    ``compiler._infer_reads`` 是**值相等**的启发式：input 里某个值恰好等于某个变量当前的值，
-    就算读了它。实测它会读出根本无关的变量（提交步读 ``verify_exit``），而那个变量在别的
-    路径上没人写——守门程序据此判 ``E_READ_BEFORE_WRITE``，整处编译决定被丢掉。与其让一条
-    臆测出来的读把一整段图拖下水，不如在这里如实收窄：**读不到的就不算读**，并把删掉的记
-    进台账（覆盖报告能说出「这一步本来疑似还读了什么，因为某条路径上没人写而作罢」）。
+    ``compiler._infer_reads`` is a **value-equality** heuristic: if some input value happens to equal a
+    variable's current value, the variable counts as read. In practice it infers entirely unrelated
+    variables (a submit step reading ``verify_exit``) that nobody writes on some other path -- the
+    gatekeeper then flags ``E_READ_BEFORE_WRITE`` and the whole compile decision is discarded. Rather
+    than let one speculative read drag down a whole section of the graph, narrow it honestly here:
+    **what cannot be read does not count as read**, and record the removals in the ledger (so the
+    coverage report can say "this step seemed to read something else too, dropped because nobody
+    writes it on some path").
     """
     for sid in plan.order:
         st = plan.states[sid]
         if not st.reads:
             continue
         ok = avail.get(sid, set())
-        # 入参模板引用的变量**不能删**：那不是 _infer_reads 猜出来的，是这一步真要拿来渲染
-        # 入参的。删掉读声明、留下模板，机器真跑时那一格渲染成空（实测：bash 拿到空命令）。
-        # 它没人写就该是一处 E_READ_BEFORE_WRITE，由 params.bind_unbound_templates 去补生产者。
+        # Variables referenced by the input template **must not be removed**: they were not guessed by
+        # _infer_reads, the step really needs them to render its input. Removing the read declaration
+        # while keeping the template renders that slot empty at run time (observed in practice: bash got
+        # an empty command). If nobody writes it, that should be an E_READ_BEFORE_WRITE, left for a later
+        # step to supply a producer.
         pinned = set(_template_vars(st.payload))
         dropped = [r for r in st.reads if r not in ok and r not in pinned]
         if not dropped:
@@ -1422,34 +1543,41 @@ def _prune_reads(plan: Plan, avail: dict) -> None:
             st.payload["reads"] = list(st.reads)
         plan.notes.append({
             "kind": "read_pruned", "state": sid, "dropped": dropped,
-            "why": "这些变量在通往本状态的某条路径上没人写过（按路径取交集），"
-                   "留着会让整处编译决定过不了先写后读检查——如实删掉"})
+            "why": "nobody writes these variables on some path leading to this state (intersection "
+                   "over paths); keeping them would make the whole compile decision fail the "
+                   "write-before-read check -- removed honestly"})
 
 
 def _fix_doc_branch(plan: Plan, p: str, targets: list, fixed: dict, snaps: dict,
                     variables: list) -> bool:
-    """文档骨架那个状态的出边：文档定的条件照用，轨迹长出的新去处各配一条与它们互斥的条件。
+    """Outgoing edges of a document-skeleton state: the document's guards are used as is, and each new
+    target grown from traces gets a guard mutually exclusive with them.
 
-    骨架的分岔长这样：``if repair_count >= 3 → s_done`` 加一条**默认边** ``→ s2``。原来的判据
-    要求「每条边都有非空条件」才复用文档条件——默认边的条件是空串，判据当场不成立，于是去
-    重学；文档说了而轨迹没走过的那些去处没有快照，学不出，整个分岔被堵。以前这个毛病被裁剪
-    掩盖着：文档边都摘了，状态只剩一个去处，走的是主干那条路。不摘之后 23 个分岔全堵。
+    A skeleton branch looks like: ``if repair_count >= 3 -> s_done`` plus a **default edge** ``-> s2``.
+    The old criterion reused the document guards only if "every edge has a non-empty guard" -- the
+    default edge's guard is the empty string, so the criterion failed on the spot and the guards were
+    relearned; targets the document mentions but no trace walked have no snapshots, cannot be learned,
+    and the whole branch got blocked. Previously this bug was masked by pruning: all document edges were
+    removed, the state had only one target left, and the main path was taken. Once they were no longer
+    removed, all 23 branches were blocked.
 
-    正确的读法是把一个分岔看成「若干带条件的边 + 至多一条兜底边」：带条件的彼此互斥即可，
-    兜底边接住其余。所以：
+    The correct reading treats a branch as "several guarded edges + at most one default edge": the
+    guarded ones only need to be mutually exclusive, and the default edge catches the rest. So:
 
-    * 文档的带条件边 —— 原样保留；
-    * 文档的默认边 —— 留在兜底位；
-    * 轨迹长出的新去处 —— 从它自己的快照上学一条谓词，**再合取上文档各条件的否定**，
-      保证与文档的边两两互斥（:func:`hexis.machine.checks._determinism` 要的是两两互斥，不看顺序）。
+    * the document's guarded edges -- kept as is;
+    * the document's default edge -- stays in the default slot;
+    * a new target grown from traces -- learn a predicate from its own snapshots, **then conjoin the
+      negations of the document guards**, guaranteeing pairwise mutual exclusion with the document edges
+      (:func:`hexis.machine.checks._determinism` requires pairwise exclusion, regardless of order).
 
-    学不出就返回 ``False``，让调用方走原来那条重学 / 引入判断 / 堵的路。
+    If nothing can be learned, return ``False`` so the caller takes the original relearn /
+    introduce-judge / block path.
     """
     doc_guarded = [t for t in targets if fixed.get(t)]
     doc_default = [t for t in targets if t in fixed and not fixed.get(t)]
     fresh = [t for t in targets if t not in fixed]
     if len(doc_default) > 1:
-        return False                                   # 骨架自己就不合法，交给下游报错
+        return False                                   # the skeleton itself is invalid; let downstream report it
     if not fresh:
         for t in doc_guarded:
             plan.edges[(p, t)].cond = fixed[t]
@@ -1457,7 +1585,8 @@ def _fix_doc_branch(plan: Plan, p: str, targets: list, fixed: dict, snaps: dict,
             plan.edges[(p, t)].cond = ""
         return True
     if len(fresh) > 1 or not doc_default:
-        # 多个新去处彼此也要互斥，或没有兜底位可留：这两种情形交给正常的学条件那条路
+        # several new targets must also be mutually exclusive, or there is no default slot left: both
+        # cases go down the normal guard-learning path
         return False
     t = fresh[0]
     g = _always_guard(snaps.get(t) or [], variables)
@@ -1470,21 +1599,24 @@ def _fix_doc_branch(plan: Plan, p: str, targets: list, fixed: dict, snaps: dict,
     plan.edges[(p, doc_default[0])].cond = ""
     plan.notes.append({"kind": "doc_branch_extended", "state": p, "new_target": t,
                        "cond": plan.edges[(p, t)].cond,
-                       "why": "文档的分岔上长出一个新去处：文档那几条边原样保留，新边配一条"
-                              "只在自己观测上为真、且与文档各条件互斥的谓词，文档的默认边"
-                              "留在兜底位"})
+                       "why": "a new target grew on a document branch: the document's edges are "
+                              "kept as is, the new edge gets a predicate true only on its own "
+                              "observations and mutually exclusive with the document guards, and the "
+                              "document's default edge stays in the default slot"})
     return True
 
 
 def fit_guards(plan: Plan, ctx: _Ctx) -> None:
-    """给每条边定条件（L9/L10），并给每条回边算计数上限（L8 的 K）。
+    """Fix a guard for every edge (L9/L10), and compute a counter bound for every back edge (K of L8).
 
-    * 一个状态只有**一个**去处 ⇒ 主干边，无条件（回边除外，见 :func:`_always_guard`）。
-    * 有**两个及以上**去处 ⇒ :func:`hexis.legacy.fit.learn_cond` 学一组两两互斥的谓词；学不出
-      就试 L10 的判断动作；再不行整个分岔退回解释执行（该状态进 ``plan.blocked``，出边一条
-      都不落，只剩守门程序给的那条兜底边）。
-    * 所有分岔边**一律带条件**，兜底位留给 FALLBACK：没见过的格局落回解释执行，而不是被
-      某一支吞掉。
+    * a state with only **one** target => main-path edge, unguarded (except back edges, see
+      :func:`_always_guard`).
+    * **two or more** targets => :func:`hexis.legacy.fit.learn_cond` learns a set of pairwise mutually
+      exclusive predicates; if that fails, try an L10 judge action; if that fails too, the whole branch
+      falls back to interpreted execution (the state goes into ``plan.blocked`` and none of its outgoing
+      edges are posted; only the default edge provided by the gatekeeper remains).
+    * all branch edges **always carry a guard**, and the default slot is left to FALLBACK: unseen
+      situations fall back to interpreted execution instead of being swallowed by some branch.
     """
     avail = _avail_map(plan)
     _prune_reads(plan, avail)
@@ -1493,7 +1625,8 @@ def fit_guards(plan: Plan, ctx: _Ctx) -> None:
     thr = ctx.thresholds
     for p in list(plan.order):
         if p in plan.blocked:
-            # 转写期就连拒到上限的点：它的出边一条都不落，兜底位留给 FALLBACK。
+            # a point that already hit the rejection limit during transcription: none of its outgoing
+            # edges are posted, and the default slot is left to FALLBACK.
             for kk in [k for k in plan.edge_order if k[0] == p]:
                 _unlink(plan, kk)
             continue
@@ -1501,26 +1634,28 @@ def fit_guards(plan: Plan, ctx: _Ctx) -> None:
         if not targets:
             continue
         snaps: dict = {t: [] for t in targets}
-        only = plan.guard_vars.get(p)                  # 引入的判断状态：只看判断变量
-        # 出边条件在**本状态执行之后**求值，所以可用集是「进入时可用 ∪ 本状态写的」。
-        # 不过滤的话会学出一条读「某条路径上没人写的变量」的谓词，守门程序当场判先写后读。
+        only = plan.guard_vars.get(p)                  # introduced judge state: only look at the judge variable
+        # Outgoing guards are evaluated **after this state runs**, so the usable set is "available on
+        # entry, union written by this state". Without this filter a predicate reading "a variable nobody
+        # writes on some path" could be learned, and the gatekeeper would flag write-before-read on the spot.
         usable = (avail.get(p, set()) | set(plan.states[p].writes)) & declared
         for dst, snap in plan.obs.get(p, []):
             if dst in snaps:
                 snaps[dst].append({k: v for k, v in snap.items()
                                    if k in usable and (only is None or k == only)})
-        # ---- 文档骨架的分岔：条件是文档定的，不重学 ---- #
+        # ---- document skeleton branch: guards are set by the document, not relearned ---- #
         fixed = getattr(plan, "fixed_conds", {}).get(p) or {}
         if fixed and _fix_doc_branch(plan, p, targets, fixed, snaps, variables):
             continue
         if len(targets) == 1:
             e = plan.edges[(p, targets[0])]
             if not e.back:
-                e.cond = ""                                # 主干
+                e.cond = ""                                # main path
                 continue
             g = _always_guard(snaps[targets[0]], variables)
             if g is None:
-                _block(plan, p, "回边学不出「什么时候该再绕一圈」的谓词，这个环整个放弃")
+                _block(plan, p, "no predicate for \"when to go round again\" could be learned for the "
+                                "back edge; the whole loop is dropped")
                 continue
             e.cond = g
             continue
@@ -1530,14 +1665,15 @@ def fit_guards(plan: Plan, ctx: _Ctx) -> None:
         if learned is None:
             learned = _judge_branch(plan, p, snaps, ctx)
         if learned is None:
-            _block(plan, p, "分岔学不出两两互斥的条件，也起不了判断动作："
-                            "整个分岔退回解释执行")
+            _block(plan, p, "no pairwise mutually exclusive guards could be learned for the branch "
+                            "and no judge action could be set up: the whole branch falls back to "
+                            "interpreted execution")
             continue
         learned = _tighten(learned, snaps, variables)
         for t in targets:
             plan.edges[(p, t)].cond = learned.get(t, "")
         if any(not plan.edges[(p, t)].cond for t in targets):
-            _block(plan, p, "有分支没拿到条件（学出的条件不全）")
+            _block(plan, p, "some branch got no guard (the learned guards are incomplete)")
     _prune(plan)
     _install_bounds(plan, ctx)
 
@@ -1553,12 +1689,13 @@ def _block(plan: Plan, p: str, why: str) -> None:
 
 
 def _install_bounds(plan: Plan, ctx: _Ctx) -> None:
-    """给每条回边配计数变量与上限 K，并**把 K 是谁定的记下来**。
+    """Give every back edge a counter variable and bound K, and **record who set K**.
 
-    ``doc_bound`` 恒为 ``None``：本模块不从文档里抠圈数上限（抠出来的数会被当成文档要求，
-    而它其实是我读文档读出来的）。所以 :func:`hexis.legacy.fit.loop_bound_detail` 一律给出
-    ``source="compiler"``——覆盖报告因此**说得出**「这条上限是编译器为了停机补的，不是文档
-    要求」。
+    ``doc_bound`` is always ``None``: this module does not extract iteration bounds from the document
+    (an extracted number would be taken as a document requirement, when it is really just the
+    compiler's reading of the document). So :func:`hexis.legacy.fit.loop_bound_detail` always yields
+    ``source="compiler"`` -- which lets the coverage report **state** "this bound was added by the
+    compiler to guarantee halting; it is not a document requirement".
     """
     for kk in plan.edge_order:
         e = plan.edges[kk]
@@ -1566,36 +1703,42 @@ def _install_bounds(plan: Plan, ctx: _Ctx) -> None:
             continue
         lb = _fit.loop_bound_detail(plan.visits.get(e.dst, 1),
                                     margin=ctx.thresholds.loop_margin)
-        # 文档骨架给这条回边起过名（``inc: repair_count``）就沿用它，别改名：骨架的条件里
-        # 写的是那个名字（``repair_count >= 3``），改成 ``sN_count`` 会让那些条件读一个没人
-        # 声明的变量，整批提案被守门程序驳回（实测：不摘文档边之后三批因此被拒）。
-        # 只有轨迹自己长出来的环才由 harness 取名。
+        # If the document skeleton already named this back edge's counter (``inc: repair_count``), keep
+        # that name; do not rename: the skeleton's guards use that name (``repair_count >= 3``), and
+        # renaming it to ``sN_count`` would make those guards read an undeclared variable, so the whole
+        # proposal batch would be rejected by the gatekeeper (observed in practice: once document edges
+        # were no longer removed, three batches were rejected for this). Only loops grown from traces
+        # get a harness-chosen name.
         e.counter = e.counter or f"{e.dst}_count"
         e.bound = e.bound or lb.k
         plan.loop_bounds.append({
             "back_edge": f"{e.src}->{e.dst}", "var": e.counter, "k": lb.k,
             "source": lb.source, "observed_max": lb.observed_max, "margin": lb.margin,
-            "why": "技能文档没有写任何圈数上限；K = ceil(margin × 单条轨迹里该状态被进入的"
-                   "最大次数)，是编译器为了「环一定停得下来」补上的"})
+            "why": "the skill document states no iteration bound; K = ceil(margin x the maximum "
+                   "number of times this state is entered in a single trace), added by the compiler "
+                   "so that \"the loop is guaranteed to halt\""})
 
 
 # --------------------------------------------------------------------------- #
-# 第二趟：落账（把决策翻成受票提议）
+# Pass 2: posting (turning decisions into receipt proposals)
 # --------------------------------------------------------------------------- #
-#: 五个批的名字与顺序：多智能体的合并阶段序（hexis/batch.py）与它一致。
+#: Names and order of the five batches; the multi-agent merge stage order matches it.
 BATCH_NAMES: tuple[str, ...] = ("entry", "trunk", "judges", "transitions", "loops")
 
 
 def build_batches(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = (),
                   audit_tools: Sequence[str] = ()) -> dict[str, list[Proposal]]:
-    """把台账翻成五个**批**：``entry``（open_machine）/ ``trunk``（建状态，含带创建边的
-    判断与终止）/ ``judges``（原地改写的判断，单智能体路径为空）/ ``transitions``（前向
-    分岔边）/ ``loops``（回边）。:func:`build_proposals` 是它们按序的拼接。
+    """Turn the ledger into five **batches**: ``entry`` (open_machine) / ``trunk`` (building states,
+    including judges and terminals with creating edges) / ``judges`` (judges rewritten in place; empty
+    on the single-agent path) / ``transitions`` (forward branch edges) / ``loops`` (back edges).
+    :func:`build_proposals` is their concatenation in order.
 
-    回边排最后不是偷懒：``close_loop`` 会调 :func:`hexis.legacy.fit.install_counter`，它要把
-    环的**目标状态当时已有的每条条件出边**都 ``and`` 上 ``count < K``，再插一条
-    ``count >= K → FALLBACK``。收完环再往那个状态上接新的条件边，新边身上没有 ``count < K``，
-    与上限出口在计满那一格同时成立——结构检查当场判条件重叠。所以环必须最后收。
+    Putting back edges last is not laziness: ``close_loop`` calls
+    :func:`hexis.legacy.fit.install_counter`, which ``and``s ``count < K`` onto **every guarded outgoing
+    edge the loop's target state has at that moment**, then inserts ``count >= K -> FALLBACK``. Adding a
+    new guarded edge to that state after closing the loop leaves ``count < K`` off the new edge, so it
+    holds together with the bound exit once the counter is full -- the structural check flags overlapping
+    guards on the spot. So loops must be closed last.
     """
     out: dict[str, list[Proposal]] = {name: [] for name in BATCH_NAMES}
     variables = _plan_variables(plan)
@@ -1607,8 +1750,8 @@ def build_batches(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = (),
         open_payload["audit_tools"] = list(audit_tools)
     out["entry"].append(Proposal(
         "open_machine", open_payload,
-        rationale=f"L1：打开机器 {plan.skill_id}，声明 {len(variables)} 个变量"
-                  f"（任务输入 {sorted(plan.input_keys)} 走 init_from）"))
+        rationale=f"L1: open machine {plan.skill_id}, declaring {len(variables)} variables"
+                  f" (task inputs {sorted(plan.input_keys)} use init_from)"))
 
     creator = {kk[1]: plan.edges[kk] for kk in plan.edge_order if plan.edges[kk].creating}
     for sid in plan.order:
@@ -1619,7 +1762,7 @@ def build_batches(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = (),
             attach = {"from_state": e.src, "from_cond": e.cond,
                       "from_support": e.support}
         elif sid != plan.initial:
-            continue                       # 没有创建边也不是起点：这个状态落不下去
+            continue                       # no creating edge and not the start: this state cannot be posted
         out["trunk"].append(_state_proposal(plan, st, attach, sid == plan.initial))
 
     for kk in plan.edge_order:
@@ -1629,8 +1772,8 @@ def build_batches(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = (),
         out["transitions"].append(Proposal(
             "add_transition",
             {"from_state": e.src, "to": e.dst, "cond": e.cond, "support": e.support},
-            rationale=f"L9：{e.src} 上的分岔，条件 {e.cond or '（兜底）'} 由 "
-                      f"fit.learn_cond 在 {e.support} 次观测的变量快照上学出",
+            rationale=f"L9: branch at {e.src}, guard {e.cond or '(default)'} learned by "
+                      f"fit.learn_cond from variable snapshots of {e.support} observations",
             trace_id=e.origin[0], step=e.origin[1]))
 
     for kk in plan.edge_order:
@@ -1641,25 +1784,26 @@ def build_batches(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = (),
             "close_loop",
             {"from_state": e.src, "to": e.dst, "cond": e.cond,
              "counter": e.counter, "bound": e.bound, "support": e.support},
-            rationale=f"L8：{e.src}→{e.dst} 是回边，收成有上限的环；计数变量 {e.counter}"
-                      f" 上限 {e.bound}（**上限是编译器加的，文档没写**）",
+            rationale=f"L8: {e.src}->{e.dst} is a back edge, closed into a bounded loop; counter {e.counter}"
+                      f" bound {e.bound} (**the bound is added by the compiler; the document does not state it**)",
             trace_id=e.origin[0], step=e.origin[1]))
     return out
 
 
 def build_proposals(plan: Plan, ctx: _Ctx, *, prohibitions: Sequence = ()) -> list[Proposal]:
-    """把台账翻成一串受票提议。顺序 = 决策顺序，唯一的例外是**回边排在最后**——
-    即 :func:`build_batches` 五个批按 :data:`BATCH_NAMES` 的拼接。"""
+    """Turn the ledger into a sequence of receipt proposals. Order = decision order, with the single
+    exception that **back edges come last** -- i.e. the concatenation of the five batches of
+    :func:`build_batches` in :data:`BATCH_NAMES` order."""
     batches = build_batches(plan, ctx, prohibitions=prohibitions)
     return [p for name in BATCH_NAMES for p in batches[name]]
 
 
 def _state_proposal(plan: Plan, st: _PState, attach: dict, is_initial: bool) -> Proposal:
-    src = attach.get("from_state") or "（起点）"
+    src = attach.get("from_state") or "(start)"
     if st.kind == "end":
         payload = {"state_id": st.sid, "terminal": st.terminal, "clause": st.clause}
         seed_t = (getattr(plan, "seed_terminals", {}) or {}).get(st.terminal)
-        if seed_t is not None:                     # 文档骨架声明的终点类别（verified/unverified）
+        if seed_t is not None:                     # terminal kind declared by the document skeleton (verified/unverified)
             payload["kind"] = seed_t.kind
             payload["output"] = list(seed_t.output)
         if st.origin_kind:
@@ -1668,7 +1812,7 @@ def _state_proposal(plan: Plan, st: _PState, attach: dict, is_initial: bool) -> 
             payload["locator"] = st.locator
         payload.update(attach)
         return Proposal("set_terminal", payload,
-                        rationale=f"L11：{src} 之后这条轨迹结束，结束方式 {st.terminal}",
+                        rationale=f"L11: the trace ends after {src}, with terminal {st.terminal}",
                         trace_id=st.origin[0], step=st.origin[1])
     if st.kind == "judge":
         labels = sorted(st.labels_seen)
@@ -1691,11 +1835,11 @@ def _state_proposal(plan: Plan, st: _PState, attach: dict, is_initial: bool) -> 
         if st.locator:
             payload["locator"] = st.locator
         payload.update(attach)
-        how = ("从文档引入（introduce_judge）" if st.introduced else
-               "模型起草（L10）" if st.drafted else "轨迹里本来就有的判断步，照原样转写")
+        how = ("introduced from the document (introduce_judge)" if st.introduced else
+               "drafted by the model (L10)" if st.drafted else "a judge step already in the traces, transcribed as is")
         return Proposal("add_judge", payload,
-                        rationale=f"L7：{src} 之后是一次判断，{how}；标签 {labels} 取自"
-                                  f"{'起草' if st.drafted else '轨迹观测'}",
+                        rationale=f"L7: a judgement follows {src}, {how}; labels {labels} taken from "
+                                  f"{'the draft' if st.drafted else 'trace observations'}",
                         trace_id=st.origin[0], step=st.origin[1])
     payload = {"state_id": st.sid, "action": dict(st.payload), "clause": st.clause}
     if st.origin_kind:
@@ -1706,26 +1850,29 @@ def _state_proposal(plan: Plan, st: _PState, attach: dict, is_initial: bool) -> 
         payload["initial"] = True
     payload.update(attach)
     return Proposal("add_state", payload,
-                    rationale=f"L7：{src} 之后是新的一步 {_brief(st.payload)}，"
-                              f"读 {st.reads} → 写 {st.writes}，条款 "
-                              f"{st.clause or '（未归属：条款归属要模型）'}",
+                    rationale=f"L7: a new step {_brief(st.payload)} follows {src}, "
+                              f"reads {st.reads} -> writes {st.writes}, clause "
+                              f"{st.clause or '(unattributed: clause attribution needs a model)'}",
                     trace_id=st.origin[0], step=st.origin[1])
 
 
 def apply_plan(ck: _checker.Checker, proposals: Sequence[Proposal], *,
                max_strikes: int = MAX_STRIKES, progress: bool = False) -> PlanResult:
-    """**第二趟**：把提议一条一条交给守门程序裁决。
+    """**Pass 2**: hand the proposals one by one to the gatekeeper for a ruling.
 
-    规矩两条，都直接对应算法 1 的要求：
+    Two rules, both directly matching Algorithm 1's requirements:
 
-    * **被拒的提议不牵连它之前被接受的提议**——这是守门程序本来就有的性质，这里只是不去
-      破坏它：一条被拒，接着提下一条。
-    * **同一个点上连拒 ``max_strikes`` 次 ⇒ ``demote_to_fallback`` 那个点，然后往下走。**
-      退回解释执行会连带删掉只能经过那个点到达的状态，所以之后凡是碰到已死状态的提议一律
-      跳过（不再去撞一次必然的拒绝）。
+    * **A rejected proposal does not affect the proposals accepted before it** -- this is a property
+      the gatekeeper already has; this function merely does not break it: after a rejection, it moves
+      on to the next proposal.
+    * **``max_strikes`` consecutive rejections at the same point => ``demote_to_fallback`` that point,
+      then move on.** Falling back to interpreted execution also removes the states reachable only
+      through that point, so every later proposal touching a dead state is skipped (no point running
+      into a certain rejection again).
 
-    ``ck`` 必须还没 ``open_machine``（提议列表的第一条就是它），或者已经打开——两种都行，
-    重复打开会被守门程序自己拒掉并记一张回执。
+    ``ck`` must either not have run ``open_machine`` yet (the first proposal in the list is exactly
+    that) or already be open -- both work; opening twice is rejected by the gatekeeper itself, which
+    records a receipt.
     """
     res = PlanResult()
     strikes: dict = defaultdict(int)
@@ -1761,8 +1908,8 @@ def apply_plan(ck: _checker.Checker, proposals: Sequence[Proposal], *,
         strikes[point] += 1
         if point and strikes[point] >= max_strikes:
             dr = ck.demote_to_fallback(
-                point, note=f"同一个点连拒 {strikes[point]} 次（最后一次："
-                            f"{receipt.reason[:80]}）——宁可少编，不编错")
+                point, note=f"the same point was rejected {strikes[point]} times in a row (last: "
+                            f"{receipt.reason[:80]}) -- better to compile less than to compile wrong")
             res.receipts.append(dr)
             strikes[point] = 0
             if dr.accepted:
@@ -1774,23 +1921,27 @@ def apply_plan(ck: _checker.Checker, proposals: Sequence[Proposal], *,
 
 
 # --------------------------------------------------------------------------- #
-# L12/L13：拒绝集与验收
+# L12/L13: rejected set and acceptance
 # --------------------------------------------------------------------------- #
 def _machine_walk(machine: Machine, trace: Trace) -> tuple[list, Optional[int]]:
-    """沿轨迹推机器，返回 ``([(记录下标, 状态)], 偏离处的记录下标或 None)``。
+    """Drive the machine along a trace; returns ``([(record index, state)], record index of the
+    divergence or None)``.
 
-    驱动逻辑与 :func:`hexis.legacy.replay.replay` 一致（用轨迹记录的 output 按 writes 白名单
-    推变量、回边自己 inc、``pick_edge`` 选边）；这里要的是**位置**，好知道该退谁。
+    The driving logic matches :func:`hexis.legacy.replay.replay` (variables advanced from the trace
+    records' output through the writes whitelist, back edges increment themselves, ``pick_edge`` picks
+    edges); what is needed here is the **position**, to know which state to demote.
     """
     r = _replay.walk(machine, trace)
-    # 虚拟开局步与零宽判断记的下标可能是 -1 / 前一条：定位「该退谁」只看真实消费了记录的状态
+    # the virtual opening step and zero-width judges may record index -1 / the previous record: to locate
+    # "which state to demote", only look at states that actually consumed a record
     seq = [(i, sid) for i, sid in r.seq if i >= 0]
     return seq, (None if r.ok else r.diverged_at)
 
 
 def _offenders(machine: Machine, rep: Any, t_plus: Sequence[Trace],
                t_minus: Sequence[Trace]) -> list[str]:
-    """验收挂了，该把哪些状态退回解释执行。保序去重，不含 FALLBACK 与不存在的状态。"""
+    """Acceptance failed: which states should fall back to interpreted execution. Order-preserving and
+    deduplicated, excluding FALLBACK and nonexistent states."""
     out: list[str] = []
 
     def push(sid: str) -> None:
@@ -1808,9 +1959,10 @@ def _offenders(machine: Machine, rep: Any, t_plus: Sequence[Trace],
         neg = t_minus[i]
         cut = neg.error_step if neg.error_step is not None else 10 ** 9
         seq, _d = _machine_walk(machine, neg)
-        # 退掉哪个状态？退 ``p`` 会让机器在 **p 之后那一步** 就进 FALLBACK，所以要挑
-        # 「下一条记录的 step 仍 ≤ 出错位置」的最后一个状态——退它，回退段才盖得住出错处，
-        # 这条反例才从「已编译区段里漏掉的」变成「还没编译到、尚不可排除的」。
+        # Which state to demote? Demoting ``p`` sends the machine into FALLBACK at **the step after
+        # p**, so pick the last state "whose next record's step is still <= the error position" --
+        # demoting it makes the fallback segment cover the error, and this negative example moves from
+        # "missed in the compiled section" to "not compiled yet, not yet excludable".
         at = [sid for idx, sid in seq
               if idx + 1 < len(neg.records) and neg.records[idx + 1].step <= cut]
         push(at[-1] if at else (seq[-1][1] if seq else machine.initial))
@@ -1822,14 +1974,18 @@ def _offenders(machine: Machine, rep: Any, t_plus: Sequence[Trace],
 
 def _settle(ck: _checker.Checker, t_plus: Sequence[Trace], t_minus: Sequence[Trace],
             thr: Thresholds, ctx: _Ctx, *, commit: bool = True) -> tuple[Any, list, bool]:
-    """L12+L13：先自己跑一遍验收，挂了就把肇事状态退回解释执行，通过了才 ``commit``。
+    """L12+L13: run acceptance ourselves first; on failure demote the offending states to interpreted
+    execution, and only ``commit`` once it passes.
 
-    为什么不直接 ``commit`` 让它挂：``Checker.commit`` 是**全有全无**的——不过就整批回滚到
-    上一次提交（这里是 ``open_machine``，也就是一台空机器）。真挂一次，前面所有被接受的改写
-    连同它们的回执一起白做，而且**回滚之后没有任何受票接口能把它们再放回去**。所以这里先用
-    :func:`hexis.legacy.verify.verify_machine`（只读、不改机器）看一眼，按报告退掉肇事的那几个
-    点，能过了再提交。修不动就**不提交**：机器停在「已通过全部结构检查、但没盖验收章」的状态，
-    比回滚成一台空机器诚实得多，账记在 ``stats["commit"]`` 里。
+    Why not just ``commit`` and let it fail: ``Checker.commit`` is **all-or-nothing** -- on failure the
+    whole batch is rolled back to the previous commit (here ``open_machine``, i.e. an empty machine). One
+    real failure wastes every accepted rewrite together with its receipts, and **after the rollback no
+    receipt interface can put them back**. So this first takes a look with
+    :func:`hexis.legacy.verify.verify_machine` (read-only, does not change the machine), demotes the
+    offending points according to the report, and commits once it passes. If it cannot be repaired, it
+    **does not commit**: the machine stays "passed all structural checks, but without the acceptance
+    stamp", which is far more honest than rolling back to an empty machine; this is recorded in
+    ``stats["commit"]``.
     """
     receipts: list = []
     rep = _verify.verify_machine(ck.machine, t_plus, t_minus, thresholds=thr)
@@ -1839,40 +1995,42 @@ def _settle(ck: _checker.Checker, t_plus: Sequence[Trace], t_minus: Sequence[Tra
             break
         bad = _offenders(ck.machine, rep, t_plus, t_minus)
         if not bad or bad == seen_bad:
-            break                    # 退不动了（比如起手动作就与起点对不上）：别空转
+            break                    # nothing more to demote (e.g. the opening action does not match the start): do not spin
         seen_bad = list(bad)
         moved = False
         for sid in bad:
             r = ck.demote_to_fallback(
-                sid, note="L12/L13：验收指着这里说不过——" + _verify.summary(rep)[:120])
+                sid, note="L12/L13: acceptance points here as failing -- " + _verify.summary(rep)[:120])
             receipts.append(r)
             moved = moved or r.accepted
-            ctx.say(f"退回解释执行 {sid}：{'✓' if r.accepted else '✗'}")
+            ctx.say(f"demote {sid} to interpreted execution: {'✓' if r.accepted else '✗'}")
         if not moved:
             break
         rep = _verify.verify_machine(ck.machine, t_plus, t_minus, thresholds=thr)
     if not rep.ok:
         return rep, receipts, False
     if not commit:
-        # 多智能体回合：验收过了也不在这里提交——只有 orchestrator 对 incumbent 提交一次
+        # multi-agent round: do not commit here even if acceptance passed -- only the orchestrator
+        # commits once, on the incumbent
         return rep, receipts, True
     receipts.append(ck.commit(t_plus=t_plus, t_minus=t_minus))
     return rep, receipts, receipts[-1].accepted
 
 
 # --------------------------------------------------------------------------- #
-# 技能与条款表
+# Skill and clause table
 # --------------------------------------------------------------------------- #
 def _resolve_skill(skill: Any) -> tuple[str, str, list, Optional[Machine]]:
-    """从 ``skill`` 里取出 ``(skill_id, 文档正文, 禁止项, 参考机器或 None)``。
+    """Extract ``(skill_id, document body, prohibitions, reference machine or None)`` from ``skill``.
 
-    认四种形状：:class:`~hexis.skill_loader.AgentSkill`、带 ``skill_doc()`` /
-    ``reference_machine()`` 的模块或对象（``examples.table_clean`` 就是）、``dict``、以及
-    一段正文字符串或一个技能目录路径。
+    Four shapes are recognized: :class:`~hexis.skill_loader.AgentSkill`; a module or object with
+    ``skill_doc()`` / ``reference_machine()`` (``examples.table_clean`` is one); a ``dict``; and a body
+    string or a skill directory path.
 
-    **参考机器只作对差用**（``CompileResult.diff_vs_reference``），一个字节都不进编译产物；
-    禁止项则是人工标出的、编不进图的东西，只有 ``skill`` 自己带 ``prohibitions`` 时才收
-    ——从参考机器上顺手拿是把靶子当箭。
+    **The reference machine is only used for diffing** (``CompileResult.diff_vs_reference``); not a
+    single byte of it goes into the compiled artifact. Prohibitions are hand-annotated things that cannot
+    be compiled into the graph, and are only collected when ``skill`` itself carries ``prohibitions``
+    -- picking them up from the reference machine would be using the target as the arrow.
     """
     if skill is None:
         return "compiled", "", [], None
@@ -1935,9 +2093,10 @@ def _resolve_skill(skill: Any) -> tuple[str, str, list, Optional[Machine]]:
 
 
 def clause_rows(doc: str, clauses: Sequence = ()) -> list[ClauseRow]:
-    """L1 的「列出条款表」。``clauses`` 给了就用（:class:`Clause` 记录或 ``(id, text)``
-    对都认）；没给先试 :func:`hexis.legacy.compiler.partition`（``## Sx`` 式编号标题），切不出
-    再用 :func:`markdown_clauses` 按结构切——任何 SKILL.md 都有条款表。"""
+    """L1's "list the clause table". If ``clauses`` is given it is used (both :class:`Clause` records
+    and ``(id, text)`` pairs are accepted); otherwise first try :func:`hexis.legacy.compiler.partition`
+    (numbered ``## Sx`` headings), and if that yields nothing, split by structure with
+    :func:`markdown_clauses` -- every SKILL.md has a clause table."""
     rows: list[ClauseRow] = []
     src: Sequence = clauses if clauses else _compiler.partition(doc or "")
     if not src and not clauses:
@@ -1966,15 +2125,16 @@ def clause_rows(doc: str, clauses: Sequence = ()) -> list[ClauseRow]:
 
 
 # --------------------------------------------------------------------------- #
-# 覆盖报告（交付物之一）
+# Coverage report (one of the deliverables)
 # --------------------------------------------------------------------------- #
 def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
               t_plus: Sequence[Trace], t_minus: Sequence[Trace], ctx: _Ctx,
               rep: Any, committed: bool, demoted: Sequence[str]) -> dict:
-    """逐条款的支持/单薄/无轨迹触达 + 结构出身 + 回退面 + 「再补哪些轨迹最值钱」。
+    """Per clause supported / thin / not reached by any trace + structure origins + fallback surface +
+    "which additional traces would be most valuable".
 
-    底座直接用 :func:`hexis.legacy.report.cover_report`，所以
-    :func:`hexis.legacy.report.render` 拿这份字典就能渲染；本函数只往上加账。
+    The base is :func:`hexis.legacy.report.cover_report` directly, so
+    :func:`hexis.legacy.report.render` can render this dict; this function only adds entries on top.
     """
     thr = ctx.thresholds
     base = _report.cover_report(machine, [(r.id, r.text) for r in rows],
@@ -1994,8 +2154,10 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
     for r in rows:
         states = cite.get(r.id, [])
         traces = sorted({tid for s in states for tid in plan.trace_states.get(s, [])})
-        # 支持度按**走过这些状态的轨迹条数**算，不按入边支持度：起点没有入边，拿入边去衡量
-        # 它会把「每条轨迹都走了的第一步」判成单薄。入边支持度另存一栏，两个数各说各的。
+        # Support counts **the number of traces that walked these states**, not incoming-edge support:
+        # the start has no incoming edge, and measuring it by incoming edges would judge "the first step
+        # every trace took" as thin. Incoming-edge support is kept in a separate column; each number
+        # tells its own story.
         sup = len(traces)
         if not states:
             status = "untouched"
@@ -2011,8 +2173,9 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
                       "support": sup,
                       "edge_support": sum(in_support.get(s, 0) for s in states)})
 
-    # K 的台账按「这条回边现在还在不在机器上」标一个 live：验收阶段退回解释执行会连带删掉
-    # 一整段，那一段的 K 只是历史，不该再算成产物里的编译器引入结构。
+    # The K ledger marks each entry live by "is this back edge still on the machine": falling back to
+    # interpreted execution during acceptance also removes a whole segment, and that segment's K is just
+    # history that should no longer count as a compiler-introduced structure in the artifact.
     live_edges = {f"{sid}->{t.to}" for sid, t in machine.transitions_all()}
     bounds = [{**lb, "live": lb["back_edge"] in live_edges} for lb in plan.loop_bounds]
 
@@ -2023,18 +2186,21 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
         introduced.append({"kind": "loop_bound", **lb})
         introduced.append({
             "kind": "counter_variable", "var": lb["var"],
-            "why": "计数变量是编译器为了给环配上限而引入的，文档里没有这个变量"})
+            "why": "the counter variable was introduced by the compiler to bound the loop; the "
+                   "document has no such variable"})
     for sid, t in machine.transitions_all():
         if t.cond and sid in plan.states and not t.inc:
             introduced.append({
                 "kind": "branch_guard", "state": sid, "cond": t.cond, "to": t.to,
-                "why": "分岔条件由 fit.learn_cond 在变量快照上学出，文档没有明写这个谓词"})
+                "why": "the branch guard was learned by fit.learn_cond from variable snapshots; the "
+                       "document does not state this predicate explicitly"})
     fb_states = sorted({sid for sid, t in machine.transitions_all()
                         if t.to == machine.fallback and sid != machine.fallback})
     introduced.append({
         "kind": "fallback_surface", "states": fb_states,
-        "why": "通往 FALLBACK 的兜底边是编译器留的逃生口：条件盖不到、判断弃权、"
-               "环绕满了都从这里退回「模型读整份文档解释执行」"})
+        "why": "default edges to FALLBACK are escape hatches left by the compiler: when guards do "
+               "not cover a case, a judge abstains, or a loop is exhausted, execution falls back "
+               "from here to \"the model reads the whole document and interprets it\""})
 
     from_doc = [{"kind": "state", "id": sid, "clause": st.clause,
                  "action": st.action.kind,
@@ -2044,11 +2210,13 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
     next_traces: list[dict] = []
     for cid in untouched:
         next_traces.append({"kind": "clause", "target": cid,
-                            "why": "没有任何轨迹触达这条条款，它现在整条落在 FALLBACK 里"})
+                            "why": "no trace reaches this clause; it currently lies entirely in "
+                                   "FALLBACK"})
     for row in plan.thin:
         next_traces.append({"kind": "edge", "target": row["edge"],
-                            "why": f"支持度 {row['support']} < {thr.min_support}，"
-                                   "被裁掉了；再多几条走这条分支的轨迹就能编下来"})
+                            "why": f"support {row['support']} < {thr.min_support}, "
+                                   "so it was pruned; a few more traces taking this branch would get "
+                                   "it compiled"})
     for note in plan.notes:
         if note.get("kind") == "blocked":
             next_traces.append({"kind": "branch", "target": note.get("state", ""),
@@ -2057,13 +2225,16 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
     if starts:
         next_traces.append({
             "kind": "start", "target": machine.initial,
-            "why": f"{len(starts)} 条接受轨迹的**起手动作**与已编译的起点不是同一步，整条"
-                   "没有转写。一台机器只有一个起点，这套形状表达不了「开局就分岔」；要么"
-                   "按起手动作把轨迹分组各编一台，要么补一个统一的开局步骤再采一轮轨迹"})
+            "why": f"the **opening action** of {len(starts)} accepted traces is not the same step "
+                   "as the compiled start, so those traces were not transcribed at all. A machine has "
+                   "only one start, and this shape cannot express \"branching at the very "
+                   "beginning\"; either group the traces by opening action and compile one machine "
+                   "per group, or add a common opening step and collect another round of traces"})
     for sid in fb_states:
         next_traces.append({"kind": "fallback", "target": sid,
-                            "why": "这个状态还留着一条通往解释执行的兜底边：走过它之后的"
-                                   "轨迹越多，越有机会把兜底那一支也编出来"})
+                            "why": "this state still has a default edge to interpreted execution: "
+                                   "the more traces walk past it, the better the chance of compiling "
+                                   "the default branch as well"})
 
     judge_states = [s for s in machine.states.values() if s.action.kind == "judge"]
     base.update({
@@ -2088,23 +2259,23 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
             "model_used": ctx.model is not None,
             "touchpoints": list(MODEL_TOUCHPOINTS),
             "model_free": [
-                "状态与主干（按规范化动作 KEY 对齐轨迹）",
-                "重复与成环（KEY 撞上已有状态即重复）",
-                "分岔条件（fit.learn_cond：支持度 / 留出正确率 / 互斥可证 三关）",
-                "回边的计数变量与上限 K（fit.loop_bound_detail）",
-                "支持度裁剪与结构检查、验收（checker / verify）",
-                "终止态与结束方式（照轨迹的 end 记录）",
+                "states and main path (traces aligned by normalized action KEY)",
+                "repeats and loops (a KEY matching an existing state is a repeat)",
+                "branch guards (fit.learn_cond: three gates -- support / holdout accuracy / provable mutual exclusion)",
+                "back-edge counter variables and bound K (fit.loop_bound_detail)",
+                "support pruning, structural checks and acceptance (checker / verify)",
+                "end states and terminals (taken from the traces' end records)",
             ],
             "needs_model": [
-                f"条款归属（本次：{'模型归属' if ctx.model is not None else '全部留空'}）",
-                f"新步 vs 重复的语义判定（本次："
-                f"{'问模型' if ctx.model is not None else '结构启发式，按动作 KEY'}）",
-                "分岔学不出条件时起草判断动作（本次："
-                f"{'可起草' if ctx.model is not None else '不起草，分岔整个退回 FALLBACK'}）",
-                "判断动作的误差率标定（没有标定就没有 Σεᵢ 这个上界）",
-                "从文档条款引入判断动作（多智能体：introduce_judge；model=None 走技能包的 judges 库）",
-                "同一动作在两种前驱语境下是否同一步（多智能体：split_context；model=None 按能否分别学出条件）",
-                "在线采集探针给快照打标签（多智能体：annotate_judge；不跑就没有判断记录）",
+                f"clause attribution (this run: {'attributed by the model' if ctx.model is not None else 'all left empty'})",
+                f"semantic new step vs repeat decision (this run: "
+                f"{'ask the model' if ctx.model is not None else 'structural heuristic, by action KEY'})",
+                "drafting a judge action when no branch guard can be learned (this run: "
+                f"{'may draft' if ctx.model is not None else 'no drafting, the whole branch falls back to FALLBACK'})",
+                "error-rate calibration of judge actions (without calibration there is no bound sum(eps_i))",
+                "introducing judge actions from document clauses (multi-agent: introduce_judge; model=None uses the skill package's judges library)",
+                "whether the same action under two predecessor contexts is the same step (multi-agent: split_context; model=None decides by whether guards can be learned separately)",
+                "online collection probes labelling snapshots (multi-agent: annotate_judge; without running it there are no judge records)",
             ],
         },
         "verify": _verify.report_dict(rep),
@@ -2116,7 +2287,8 @@ def _coverage(machine: Machine, plan: Plan, rows: Sequence[ClauseRow],
 
 
 def _diff(machine: Machine, ref: Optional[Machine]) -> Optional[dict]:
-    """编译产物与手写目标机器的逐项对差。没有参考机器就返回 ``None``。"""
+    """Item-by-item diff between the compiled artifact and the hand-written target machine. Returns
+    ``None`` without a reference machine."""
     if ref is None:
         return None
 
@@ -2140,63 +2312,68 @@ def _diff(machine: Machine, ref: Optional[Machine]) -> Optional[dict]:
                                   if s.action.kind == "judge"),
         "prohibitions_reference": [p.id for p in ref.prohibitions],
         "prohibitions_compiled": [p.id for p in machine.prohibitions],
-        "note": "参考机器是**目标形状**，不是交付物；这张表只用来说明编译产物差在哪里。",
+        "note": "the reference machine is the **target shape**, not a deliverable; this table only "
+                "shows where the compiled artifact differs.",
     }
 
 
 # --------------------------------------------------------------------------- #
-# 顶层
+# Top level
 # --------------------------------------------------------------------------- #
 def compile_skill(skill: Any, t_plus: Sequence[Trace], t_minus: Sequence[Trace] = (), *,
                   model: Any = None, thresholds: Optional[Thresholds] = None,
                   clauses: Sequence = (), progress: bool = False,
                   begin: bool = False) -> CompileResult:
-    """算法 1：从真实执行轨迹顺序转写编译出一台机器。**唯一的写机器通道是守门程序。**
+    """Algorithm 1: compile a machine by sequential transcription of real execution traces. **The only
+    channel that writes the machine is the gatekeeper.**
 
-    ``skill`` 认技能对象/模块/``dict``/正文/目录路径（见 :func:`_resolve_skill`）；
-    ``t_plus`` 是接受轨迹，``t_minus`` 是拒绝轨迹（L12 用它验「机器会不会在出错处或更早偏
-    离」）；``clauses`` 不给就从正文切。``model=None`` 走确定性启发式，全程无网络。
+    ``skill`` accepts a skill object/module/``dict``/body/directory path (see :func:`_resolve_skill`);
+    ``t_plus`` are accepted traces, ``t_minus`` rejected traces (L12 uses them to verify "the machine
+    diverges at or before the error"); ``clauses`` are split from the body if not given. ``model=None``
+    uses deterministic heuristics, with no network at all.
 
-    返回的 :class:`CompileResult` 里，``machine`` 是产物，``receipts`` 是它每一步怎么长出来
-    的审计痕迹，``coverage`` 是覆盖报告（:func:`hexis.legacy.report.render` 直接渲染），
-    ``judges`` 列出机器里每个判断动作及其出身，``stats`` 是计数，``diff_vs_reference`` 在能
-    拿到手写目标机器时给出逐项对差。
+    In the returned :class:`CompileResult`, ``machine`` is the artifact, ``receipts`` the audit trail of
+    how each step of it grew, ``coverage`` the coverage report (rendered directly by
+    :func:`hexis.legacy.report.render`), ``judges`` lists every judge action in the machine with its
+    origin, ``stats`` holds counters, and ``diff_vs_reference`` gives an item-by-item diff when a
+    hand-written target machine is available.
     """
     thr = thresholds or Thresholds()
     skill_id, doc, prohibitions, ref = _resolve_skill(skill)
     rows = clause_rows(doc, clauses)
     ctx = _Ctx(model=model, thresholds=thr, rows=rows, doc=doc, progress=progress)
-    ctx.say(f"L1：技能 {skill_id}，条款表 {len(rows)} 条，"
-            f"T+ {len(t_plus)} 条、T- {len(t_minus)} 条，"
-            f"模型 {'有' if model is not None else '无（走确定性启发式）'}")
+    ctx.say(f"L1: skill {skill_id}, clause table {len(rows)} rows, "
+            f"T+ {len(t_plus)} traces, T- {len(t_minus)} traces, "
+            f"model {'present' if model is not None else 'absent (deterministic heuristics)'}")
     if begin:
-        # 开局工具：每条轨迹前垫一步 BEGIN_TOOL，机器因此只有一个起点，真实首步成为它之后
-        # 的分岔——start_mismatch 归零。回放对此透明（replay.walk 会虚拟地补上同一步），
-        # 所以 T+/T- 的排除与复述检查照常拿原轨迹跑。
+        # Opening tool: prepend a BEGIN_TOOL step to every trace, so the machine has exactly one start
+        # and the real first step becomes a branch after it -- start_mismatch drops to zero. Replay is
+        # transparent to this (replay.walk virtually adds the same step), so the T+/T- exclusion and
+        # replay checks still run on the original traces.
         from hexis.traces.trace_adapter import with_begin
         t_plus = [with_begin(t) for t in t_plus]
         t_minus = [with_begin(t) for t in t_minus]
 
-    # ---- 第一趟：转写（L2–L11 的决策） ---- #
+    # ---- pass 1: transcription (decisions of L2-L11) ---- #
     plan = transcribe(t_plus, ctx=ctx, skill_id=skill_id)
-    _drop_thin(plan, thr.min_support)                       # L14 前半
-    fit_guards(plan, ctx)                                   # L9/L10 定条件 + L8 定 K
-    ctx.say(f"转写完成：{len(plan.order)} 个状态、{len(plan.edge_order)} 条边、"
-            f"{len(plan.blocked)} 处分岔编不出来")
+    _drop_thin(plan, thr.min_support)                       # first half of L14
+    fit_guards(plan, ctx)                                   # L9/L10 fix guards + L8 set K
+    ctx.say(f"transcription done: {len(plan.order)} states, {len(plan.edge_order)} edges, "
+            f"{len(plan.blocked)} branches could not be compiled")
 
-    # ---- 第二趟：落账（每条改写一张回执） ---- #
+    # ---- pass 2: posting (one receipt per rewrite) ---- #
     ck = _checker.Checker(skill_id, doc=doc, thresholds=thr)
     proposals = build_proposals(plan, ctx, prohibitions=prohibitions)
     filed = apply_plan(ck, proposals, progress=progress)
-    if not ck.opened:                                       # 连机器都没打开：交空手
+    if not ck.opened:                                       # not even the machine was opened: return empty-handed
         from hexis.machine.schema import empty_machine
         return CompileResult(machine=empty_machine(skill_id), receipts=filed.receipts,
                              coverage={}, judges=[],
                              stats={"committed": False,
-                                    "commit": "open_machine 都没通过，什么都没编"},
+                                    "commit": "not even open_machine passed; nothing was compiled"},
                              diff_vs_reference=None)
 
-    # ---- L12 + L13：拒绝集与验收 ---- #
+    # ---- L12 + L13: rejected set and acceptance ---- #
     rep, settle_receipts, committed = _settle(ck, t_plus, t_minus, thr, ctx)
     machine = ck.machine
     receipts = filed.receipts + settle_receipts
@@ -2221,8 +2398,9 @@ def compile_skill(skill: Any, t_plus: Sequence[Trace], t_minus: Sequence[Trace] 
         "states_added": sum(1 for r in receipts
                             if r.op in ("add_state", "add_judge", "set_terminal")
                             and r.accepted),
-        # 只加边的那两个接口。建状态的接口**自带入边**（add_state 的 from_state），所以
-        # 机器上的边比这个数多——机器的实际条数看 n_transitions。
+        # Only the two edge-only interfaces. The state-building interfaces **bring their own incoming
+        # edge** (add_state's from_state), so the machine has more edges than this number -- see
+        # n_transitions for the machine's actual count.
         "transitions_added": sum(1 for r in receipts
                                  if r.op in ("add_transition", "close_loop")
                                  and r.accepted),
@@ -2239,21 +2417,23 @@ def compile_skill(skill: Any, t_plus: Sequence[Trace], t_minus: Sequence[Trace] 
         "prompt_tokens": None, "completion_tokens": None,
         "blocked_branches": sorted(plan.blocked),
         "thin_edges_dropped": len(plan.thin),
-        # 起手动作与起点对不上、整条没转写的接受轨迹。一台机器只有一个起点，这套形状表达
-        # 不了「开局就分岔」——这类轨迹注定复述不出来，验收因此会挂，得如实报出来。
+        # Accepted traces whose opening action does not match the start and were not transcribed at
+        # all. A machine has only one start, and this shape cannot express "branching at the very
+        # beginning" -- such traces can never be replayed, so acceptance fails and must be reported
+        # honestly.
         "traces_not_transcribed": sum(1 for n in plan.notes
                                       if n.get("kind") == "start_mismatch"),
         "committed": committed,
-        "commit": ("验收通过并已提交" if committed
-                   else "验收没过、**没有提交**（提交是全有全无的，挂一次就把已接受的改写"
-                        "整批回滚成空机器）：" + _verify.summary(rep)),
+        "commit": ("acceptance passed and committed" if committed
+                   else "acceptance failed, **not committed** (commit is all-or-nothing; one failure "
+                        "rolls every accepted rewrite back to an empty machine): " + _verify.summary(rep)),
         "structural_findings": structural_findings(machine),
     }
     usage = _runtime._usage_of(model)
     if usage:
         stats["prompt_tokens"] = usage.get("prompt_tokens")
         stats["completion_tokens"] = usage.get("completion_tokens")
-    ctx.say(f"L13：{stats['commit']}")
+    ctx.say(f"L13: {stats['commit']}")
     return CompileResult(machine=machine, receipts=receipts, coverage=coverage,
                          judges=judges, stats=stats,
                          diff_vs_reference=_diff(machine, ref))

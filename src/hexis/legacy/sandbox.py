@@ -1,42 +1,46 @@
-"""跑真代码的沙箱：技能自带的 ``scripts/*.py`` 与模型现写的 python 都在这里执行。
+"""A sandbox for running real code: a skill's own ``scripts/*.py`` and python the model writes on the fly both run here.
 
-编译一个技能绕不开**真的把它的脚本跑起来**。math-skill 的 ``scripts/math_verify.py``
-是 788 行 sympy，里面 ``parse_expr`` 一路走到 python 的 ``eval``，而喂进去的表达式来自
-大模型。这一层是整条链上**唯一**的边界，所以它按边界写，不按工具写。
+Compiling a skill cannot avoid **actually running its scripts**. A math skill's ``scripts/math_verify.py`` is 788
+lines of sympy in which ``parse_expr`` goes all the way down to python's ``eval``, and the expressions fed into it come
+from a large model. This layer is the **only** boundary in the whole chain, so it is written as a boundary, not as a
+tool.
 
-四条真的落到实处的隔离，外加一条没落实、必须照实说的：
+Four isolation measures that really are in place, plus one that is not and has to be stated as such:
 
-* **墙钟超时 + 杀进程树。** ``equiv "9^9^9" "1"`` 在这台机器上永不返回——那份脚本从头
-  到尾没有任何内部超时。只 kill 父进程不够：模型现写的代码会派生子进程。win32 走
-  ``taskkill /F /T`` 再补一刀 ``TerminateJobObject``，POSIX 走进程组 ``killpg``；杀完
-  回头确认真的没了（:func:`pid_alive`），确认不了不谎报。
-* **环境饥饿。** 子进程的环境**从空字典搭起**，只放白名单里那几个。``API_KEY`` /
-  ``ANTHROPIC_*`` / ``OPENAI_*`` / ``HTTP(S)_PROXY`` 连调用方在 ``env_allow`` 里显式点名
-  也不放行（:func:`_denied`）——一次手滑就是一把线上密钥进了 LLM 现写的 python。
-* **内存上限。** POSIX 上 ``setrlimit(RLIMIT_AS)``；win32 上 Job Object
-  （``CreateJobObjectW`` + ``ProcessMemoryLimit`` + ``KILL_ON_JOB_CLOSE``）。Job 建不起来
-  或者进程挂不进去，就**降级并如实上报**：:meth:`Sandbox.isolation_report` 里
-  ``mem_limit`` 变 ``False``、``mem_limit_method`` 变 ``"none"``。不声称没做到的事。
-* **cwd 隔离。** 每个沙箱一个临时工作目录，绝不是仓库；脚本按 ``root`` 解析并校验不许用
-  ``..`` 逃出去（逃逸直接 :class:`SandboxError`，不是安静地返回失败）。
-  ``PYTHONDONTWRITEBYTECODE=1`` 顺带保证 ``third_party/`` 不会被写进 ``__pycache__``
-  ——那棵树是编译目标，必须逐字节不变。
+* **Wall-clock timeout + killing the process tree.** ``equiv "9^9^9" "1"`` never returns on this machine: that script
+  has no internal timeout anywhere. Killing only the parent is not enough, because code the model writes spawns child
+  processes. win32 uses ``taskkill /F /T`` followed by ``TerminateJobObject`` for good measure, POSIX uses ``killpg``
+  on the process group; after the kill it checks that the processes are really gone (:func:`pid_alive`), and when
+  that cannot be confirmed it does not claim otherwise.
+* **Environment starvation.** The child's environment is **built from an empty dict** holding only the allowlisted
+  names. ``API_KEY`` / ``ANTHROPIC_*`` / ``OPENAI_*`` / ``HTTP(S)_PROXY`` are withheld even when the caller names them
+  explicitly in ``env_allow`` (:func:`_denied`): a single slip would put a live production key into python an LLM
+  just wrote.
+* **Memory limit.** ``setrlimit(RLIMIT_AS)`` on POSIX; a Job Object on win32 (``CreateJobObjectW`` +
+  ``ProcessMemoryLimit`` + ``KILL_ON_JOB_CLOSE``). If the Job cannot be created or the process cannot be assigned to
+  it, the sandbox **degrades and reports it honestly**: in :meth:`Sandbox.isolation_report` ``mem_limit`` becomes
+  ``False`` and ``mem_limit_method`` becomes ``"none"``. Nothing is claimed that was not done.
+* **cwd isolation.** Every sandbox gets its own temporary working directory, never the repository; scripts are
+  resolved against ``root`` and checked so they cannot escape with ``..`` (an escape raises :class:`SandboxError`
+  right away instead of quietly returning a failure). ``PYTHONDONTWRITEBYTECODE=1`` additionally guarantees that no
+  ``__pycache__`` gets written into ``third_party/``: that tree is a compilation target and must stay byte-for-byte
+  unchanged.
 
-* **网络：拦不住。** 不上容器或网络命名空间，就没有办法在 OS 层给一个子进程断网，这里
-  不装作能。``isolation_report()["network_blocked"]`` 恒为 ``False``，让 experiment.py
-  把**真实的**隔离等级印进报告，而不是印一个好看的。同理 ``filesystem_isolated`` 也是
-  ``False``：只换了 cwd，子进程照样能读整块盘。
+* **Network: not blocked.** Without containers or network namespaces there is no way to cut a child process off the
+  network at the OS level, and this module does not pretend it can. ``isolation_report()["network_blocked"]`` is
+  always ``False``, so that the experiment report prints the **real** isolation level rather than a flattering one.
+  Likewise ``filesystem_isolated`` is ``False``: only the cwd changes, and the child can still read the whole disk.
 
-调用约定上有两处是踩出来的，写在这里免得再踩：
+Two calling conventions were learned the hard way; they are written down here so nobody trips over them again:
 
-* ``math_verify.py`` 的 ``--json`` 挂在**顶层** parser 上，必须排在子命令**前面**。
-  ``--json equiv a b`` 退出码 0；``equiv a b --json`` 退出码 2（unrecognized arguments）。
-* 不给 ``PYTHONIOENCODING=utf-8``，Windows 上 python 打印非 ASCII 直接
-  ``UnicodeEncodeError``，从外面看只是「输出为空」——一个查不动的假故障。
+* The ``--json`` of ``math_verify.py`` belongs to the **top-level** parser and must come **before** the subcommand.
+  ``--json equiv a b`` exits with 0; ``equiv a b --json`` exits with 2 (unrecognized arguments).
+* Without ``PYTHONIOENCODING=utf-8``, python on Windows raises ``UnicodeEncodeError`` when printing non-ASCII, which
+  from outside only looks like "empty output": a phantom failure that is practically impossible to track down.
 
-**一次运行一个沙箱**（沿用旧 toolize.runner 的政策）：第三步要读第一步落下的中间文件，
-每步各起一个沙箱就读不到了。同理这一份**不是线程安全的**：win32 的杀树会连坐同一个
-Job 里的全部进程，一个沙箱同时跑两个命令会互相误杀。
+**One sandbox per run**: step three has to read intermediate files left behind by step one, which a fresh sandbox per
+step would make impossible. For the same reason this class is **not thread-safe**: the win32 tree kill takes down
+every process in the same Job, so two commands running at once in one sandbox would kill each other.
 """
 
 from __future__ import annotations
@@ -58,13 +62,13 @@ OUTCOME_NONZERO = "nonzero"
 OUTCOME_TIMEOUT = "timeout"
 OUTCOME_ERROR = "error"
 
-#: 从父进程环境里**按名字**放行的那几个。别的一律不进子进程。
+#: The few names passed through from the parent environment **by name**. Nothing else enters the child.
 _BASE_ALLOW = (
     "PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE",
     "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE", "LANG", "LC_ALL", "TZ",
 )
 
-#: 无论调用方怎么点名都不放行的。名字里带这些子串的一律扣下。
+#: Never passed through, however the caller names them. Any name containing one of these substrings is withheld.
 _DENY_SUBSTR = ("KEY", "SECRET", "TOKEN", "PASSWORD", "PASSWD", "CREDENTIAL")
 _DENY_PREFIX = ("ANTHROPIC_", "OPENAI_", "AWS_", "AZURE_", "GOOGLE_", "GCP_",
                 "HF_")
@@ -72,16 +76,16 @@ _DENY_EXACT = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "FTP_PROXY", "NO_PROXY"
 
 
 class SandboxError(RuntimeError):
-    """沙箱拒绝执行：路径逃逸、沙箱已关闭这类**调用方的错**。
+    """The sandbox refuses to execute: path escapes, a closed sandbox and similar **caller errors**.
 
-    与「脚本跑挂了」刻意分开：后者是 :class:`ExecResult` 里 ``outcome='error'`` 的一条
-    数据，前者是异常。理由沿用旧 toolize.runner 的那条政策——守卫抛出来的东西当成
-    ``False`` 处理，机器就会安静地走错边，最后只报一句「结果不对」。
+    Deliberately kept apart from "the script crashed": the latter is a piece of data in :class:`ExecResult` with
+    ``outcome='error'``, the former is an exception. The reasoning: when whatever a guard raises is treated as
+    ``False``, the machine quietly takes the wrong edge and in the end reports only "the result is wrong".
     """
 
 
 def _denied(name: str) -> bool:
-    """这个环境变量名是否属于「点名也不给」的那一类。"""
+    """Whether this environment variable name belongs to the "withheld even when named" class."""
     up = name.upper()
     return (up in _DENY_EXACT
             or any(up.startswith(p) for p in _DENY_PREFIX)
@@ -89,14 +93,14 @@ def _denied(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# win32：Job Object（内存上限 + 关闭即连坐杀光）
+# win32: Job Object (memory limit + everything killed when it is closed)
 # --------------------------------------------------------------------------- #
 _JOB_LIMIT_PROCESS_MEMORY = 0x00000100
 _JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_EXTENDED_LIMIT_CLASS = 9
 _STILL_ACTIVE = 259
 
-if sys.platform == "win32":                       # pragma: no cover - 平台分支
+if sys.platform == "win32":                       # pragma: no cover - platform branch
     import ctypes
     from ctypes import wintypes
 
@@ -129,7 +133,7 @@ if sys.platform == "win32":                       # pragma: no cover - 平台分
 
     def _kernel32() -> Any:
         k = ctypes.WinDLL("kernel32", use_last_error=True)
-        # restype 必须显式给：默认 c_int 会把 64 位句柄截成 32 位，句柄看着有效、用起来炸。
+        # restype must be explicit: the default c_int truncates 64-bit handles to 32 bits (looks valid, fails when used).
         k.CreateJobObjectW.restype = wintypes.HANDLE
         k.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
         k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
@@ -144,14 +148,14 @@ if sys.platform == "win32":                       # pragma: no cover - 平台分
 
 
 def _win_create_job(mem_limit_mb: int) -> tuple[Optional[int], str]:
-    """建一个带单进程内存上限、句柄一关就连坐杀光的 Job。失败返回 ``(None, 原因)``。"""
+    """Create a Job with a per-process memory limit that kills everything when its handle closes. ``(None, reason)`` on failure."""
     if sys.platform != "win32":
-        return None, "非 win32"
-    try:                                          # pragma: no cover - 平台分支
+        return None, "not win32"
+    try:                                          # pragma: no cover - platform branch
         k = _kernel32()
         handle = k.CreateJobObjectW(None, None)
         if not handle:
-            return None, f"CreateJobObjectW 失败 err={ctypes.get_last_error()}"
+            return None, f"CreateJobObjectW failed err={ctypes.get_last_error()}"
         info = _JOB_EXTENDED_LIMIT()
         info.BasicLimitInformation.LimitFlags = (
             _JOB_LIMIT_PROCESS_MEMORY | _JOB_LIMIT_KILL_ON_JOB_CLOSE)
@@ -161,31 +165,32 @@ def _win_create_job(mem_limit_mb: int) -> tuple[Optional[int], str]:
         if not ok:
             err = ctypes.get_last_error()
             k.CloseHandle(handle)
-            return None, f"SetInformationJobObject 失败 err={err}"
+            return None, f"SetInformationJobObject failed err={err}"
         return int(handle), ""
-    except Exception as exc:                      # noqa: BLE001 - 降级，不是崩
+    except Exception as exc:                      # noqa: BLE001 - degrade, do not crash
         return None, f"{type(exc).__name__}: {exc}"
 
 
 def _win_assign_job(job: int, pid: int) -> str:
-    """把已经起来的进程挂进 Job。返回空串表示成功，否则是失败原因。
+    """Assign an already started process to the Job. Returns an empty string on success, otherwise the failure reason.
 
-    这里有一个**真实存在的竞态**：进程是先起来、后挂进 Job 的，中间那几十毫秒（python
-    解释器启动）里它派生的孙进程不受 Job 管。要彻底堵上得用 ``CREATE_SUSPENDED`` +
-    ``STARTUPINFOEX``，而 ``subprocess.Popen`` 起完就把线程句柄关了，拿不到手。所以这条
-    如实写在这里，也如实写进 ``isolation_report()['notes']``。
+    There is a **real race** here: the process starts first and is assigned to the Job afterwards, and grandchildren it
+    spawns during those few tens of milliseconds (python interpreter startup) are not governed by the Job. Closing the
+    gap completely would take ``CREATE_SUSPENDED`` + ``STARTUPINFOEX``, but ``subprocess.Popen`` closes the thread
+    handle right after starting, so it is out of reach. That is why this is stated honestly here, and just as honestly
+    in ``isolation_report()['notes']``.
     """
     if sys.platform != "win32":
-        return "非 win32"
-    try:                                          # pragma: no cover - 平台分支
+        return "not win32"
+    try:                                          # pragma: no cover - platform branch
         k = _kernel32()
-        # PROCESS_SET_QUOTA | PROCESS_TERMINATE：AssignProcessToJobObject 要的两项权限。
+        # PROCESS_SET_QUOTA | PROCESS_TERMINATE: the two access rights AssignProcessToJobObject needs.
         handle = k.OpenProcess(0x0100 | 0x0001, False, int(pid))
         if not handle:
-            return f"OpenProcess 失败 err={ctypes.get_last_error()}"
+            return f"OpenProcess failed err={ctypes.get_last_error()}"
         try:
             if not k.AssignProcessToJobObject(job, handle):
-                return f"AssignProcessToJobObject 失败 err={ctypes.get_last_error()}"
+                return f"AssignProcessToJobObject failed err={ctypes.get_last_error()}"
         finally:
             k.CloseHandle(handle)
         return ""
@@ -194,15 +199,15 @@ def _win_assign_job(job: int, pid: int) -> str:
 
 
 def pid_alive(pid: int) -> bool:
-    """这个 pid 现在还活着吗。杀完之后**回头确认**用的，不是装饰。
+    """Is this pid still alive right now? Used to **double-check** after a kill; it is not decoration.
 
-    win32 走 ``OpenProcess`` + ``GetExitCodeProcess``（退出码恰好是 259 的进程会被误判为
-    存活，这是 Win32 API 本身的歧义，无解）；POSIX 走 ``kill(pid, 0)``（要求调用方已经
-    ``wait()`` 收过尸，否则僵尸进程仍算存活）。
+    win32 uses ``OpenProcess`` + ``GetExitCodeProcess`` (a process whose exit code happens to be 259 is misjudged as
+    alive; that ambiguity is inherent in the Win32 API and cannot be resolved); POSIX uses ``kill(pid, 0)`` (the caller
+    must already have reaped the process with ``wait()``, otherwise a zombie still counts as alive).
     """
     if not pid or pid < 0:
         return False
-    if sys.platform == "win32":                   # pragma: no cover - 平台分支
+    if sys.platform == "win32":                   # pragma: no cover - platform branch
         try:
             k = _kernel32()
             handle = k.OpenProcess(0x1000, False, int(pid))   # QUERY_LIMITED_INFORMATION
@@ -229,18 +234,18 @@ def pid_alive(pid: int) -> bool:
 
 
 # --------------------------------------------------------------------------- #
-# POSIX：RLIMIT_AS
+# POSIX: RLIMIT_AS
 # --------------------------------------------------------------------------- #
 def _rlimit_preexec(mem_limit_mb: int) -> Optional[Any]:
-    """返回一个在子进程里设地址空间上限的 ``preexec_fn``；win32 上返回 None。"""
+    """Return a ``preexec_fn`` that sets the address-space limit in the child; returns None on win32."""
     if sys.platform == "win32":
         return None
     try:
-        import resource                           # noqa: PLC0415 - POSIX 才有
+        import resource  # noqa: PLC0415 - POSIX only
     except Exception:                             # noqa: BLE001
         return None
 
-    def _apply() -> None:                         # pragma: no cover - POSIX 分支
+    def _apply() -> None:                         # pragma: no cover - POSIX branch
         try:
             cap = max(1, int(mem_limit_mb)) * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (cap, cap))
@@ -251,19 +256,20 @@ def _rlimit_preexec(mem_limit_mb: int) -> Optional[Any]:
 
 
 # --------------------------------------------------------------------------- #
-# 一次执行的结果
+# Result of one execution
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class ExecResult:
-    """一次子进程执行的全部可观察结果。
+    """Everything observable about one child-process execution.
 
-    ``outcome`` 是四选一：``ok``（退出码 0）/ ``nonzero``（跑完了但退出码非 0）/
-    ``timeout``（墙钟到点被杀）/ ``error``（根本没起来：脚本不存在、OSError）。
-    这四种在「没拿到想要的结果」上长得一样，但要改的东西完全不同，所以分开记。
+    ``outcome`` is one of four: ``ok`` (exit code 0) / ``nonzero`` (ran to the end but with a non-zero exit code) /
+    ``timeout`` (killed when the wall clock ran out) / ``error`` (never started: missing script, OSError).
+    All four look the same as far as "did not get the wanted result" goes, but what needs fixing is completely
+    different, so they are recorded separately.
 
-    ``pid`` 不在最小契约里，多给一个：杀完之后要能**从外面核对**那个进程真的没了
-    （见 :func:`pid_alive`），没有 pid 就只能相信自己。放在最后且有默认值，按位置构造
-    前八个字段的调用方不受影响。
+    ``pid`` is not part of the minimal contract; it is an extra: after a kill it must be possible to **verify from the
+    outside** that the process is really gone (see :func:`pid_alive`); without a pid we could only trust ourselves. It
+    comes last and has a default, so callers that build the first eight fields positionally are unaffected.
     """
 
     ok: bool
@@ -278,17 +284,18 @@ class ExecResult:
 
 
 # --------------------------------------------------------------------------- #
-# 沙箱
+# Sandbox
 # --------------------------------------------------------------------------- #
 class Sandbox:
-    """在隔离的子进程里跑技能脚本与模型现写的 python。
+    """Run skill scripts and python the model writes on the fly in isolated child processes.
 
-    ``root`` 是技能根目录（例如 ``third_party/math-skill``）：``run_script`` 的相对路径
-    按它解析，且校验解析结果必须仍在它之下。**脚本原地跑，不拷贝**——拷一份进临时目录
-    会在 ``third_party/`` 之外多出一棵可写的树，而 cwd 已经是临时目录，写操作落不到原
-    树上，拷贝买不到额外的安全。
+    ``root`` is the skill root directory (for example ``third_party/math-skill``): relative paths given to
+    ``run_script`` are resolved against it, and the resolved path is checked to still lie under it. **Scripts run in
+    place, without copying**: a copy in a temporary directory would add a writable tree outside ``third_party/``, and
+    since the cwd is already a temporary directory, writes do not land in the original tree anyway; copying buys no
+    extra safety.
 
-    典型用法::
+    Typical usage::
 
         with Sandbox(Path("third_party/math-skill"), timeout_s=20) as sb:
             r = sb.run_script("scripts/math_verify.py", ["--json", "equiv", "1/2", "0.5"])
@@ -301,7 +308,7 @@ class Sandbox:
         self.timeout_s = float(timeout_s)
         self.mem_limit_mb = int(mem_limit_mb)
         self.env_allow = [k for k in env_allow if not _denied(k)]
-        #: 被 ``_denied`` 拦下的那些名字。如实记着，供 isolation_report 交代。
+        #: The names blocked by ``_denied``. Recorded honestly, so that isolation_report can disclose them.
         self.env_denied = [k for k in env_allow if _denied(k)]
         self.python = python or sys.executable
         self.max_output_chars = int(max_output_chars)
@@ -313,7 +320,7 @@ class Sandbox:
         self._closed = False
         self._counter = 0
 
-    # ---- 生命周期 ------------------------------------------------------- #
+    # ---- lifecycle ----------------------------------------------------- #
     def __enter__(self) -> "Sandbox":
         self._ensure_ready()
         return self
@@ -322,16 +329,16 @@ class Sandbox:
         self.close()
 
     def close(self) -> None:
-        """关掉 Job（连坐杀光残留进程）再删临时目录。顺序不能反。
+        """Close the Job (killing every leftover process with it), then delete the temporary directory. Never the other way round.
 
-        先删目录的话，残留的孙进程可能还攥着目录里的文件句柄，Windows 上 rmtree 直接
-        ``PermissionError``，删剩半个目录还漏一个活进程。
+        If the directory went first, leftover grandchildren might still hold file handles inside it; on Windows rmtree
+        then fails with ``PermissionError``, leaving half a directory behind and a live process on the loose.
         """
-        if self._job is not None:                 # pragma: no cover - 平台分支
+        if self._job is not None:                 # pragma: no cover - platform branch
             try:
                 k = _kernel32()
                 k.TerminateJobObject(self._job, 1)
-                k.CloseHandle(self._job)          # KILL_ON_JOB_CLOSE：补一道保险
+                k.CloseHandle(self._job)          # KILL_ON_JOB_CLOSE: one more safeguard
             except Exception:                     # noqa: BLE001
                 pass
             self._job = None
@@ -342,28 +349,28 @@ class Sandbox:
 
     @property
     def workdir(self) -> Path:
-        """本沙箱的临时工作目录（= 子进程的 cwd）。没建就现建。"""
+        """This sandbox's temporary working directory (= the child's cwd). Created on demand."""
         self._ensure_ready()
         assert self._workdir is not None
         return self._workdir
 
     def _ensure_ready(self) -> None:
-        """懒建工作目录与 Job。不用 ``with`` 也能跑，只是没人替你收尾。"""
+        """Lazily create the working directory and the Job. Works without ``with`` too; there is just nobody to clean up after you."""
         if self._closed:
-            raise SandboxError("沙箱已关闭，不能再执行")
+            raise SandboxError("sandbox is closed and cannot execute anything")
         if self._workdir is None:
             self._workdir = Path(tempfile.mkdtemp(prefix="s2f_sandbox_"))
         if sys.platform == "win32" and self._job is None and not self._job_note:
             self._job, self._job_note = _win_create_job(self.mem_limit_mb)
             if self._job is None and not self._job_note:
-                self._job_note = "未知原因"
+                self._job_note = "unknown reason"
 
-    # ---- 隔离等级：如实交代 --------------------------------------------- #
+    # ---- isolation level, disclosed honestly ------------------------- #
     def isolation_report(self) -> dict:
-        """这台沙箱**实际**做到了哪几条。给 experiment.py 印进报告用。
+        """Which of the measures this sandbox **actually** achieved, for the experiment report to print.
 
-        ``mem_limit`` 是「真的施加上了」而不是「打算施加」：win32 上 Job 建不起来、或者
-        任何一次挂载失败过，它就是 ``False``。``network_blocked`` 恒 ``False``。
+        ``mem_limit`` means "really applied", not "intended": on win32, if the Job could not be created or any
+        assignment ever failed, it is ``False``. ``network_blocked`` is always ``False``.
         """
         self._ensure_ready()
         if sys.platform == "win32":
@@ -373,15 +380,15 @@ class Sandbox:
             mem_ok = _rlimit_preexec(self.mem_limit_mb) is not None
             method = "rlimit" if mem_ok else "none"
         notes = [
-            "网络无法在 OS 层阻断：不上容器/网络命名空间就做不到，这里不假装做到了。",
-            "只隔离 cwd：子进程仍能读整块盘，写操作也只是「没理由往外写」而非「不能」。",
+            "the network cannot be blocked at the OS level: impossible without containers/network namespaces, and this sandbox does not pretend otherwise",
+            "only the cwd is isolated: the child can still read the whole disk, and it merely has \"no reason to write elsewhere\" rather than being unable to",
         ]
         if sys.platform == "win32":
-            notes.append("Job 是进程起来之后挂上的，这几十毫秒里派生的孙进程不受 Job 管。")
+            notes.append("the Job is attached after the process starts; grandchildren spawned in those few tens of milliseconds are not governed by it")
             if self._job is None:
-                notes.append(f"Job Object 建不起来，内存上限已降级为无：{self._job_note}")
+                notes.append(f"the Job Object could not be created, so the memory limit degraded to none: {self._job_note}")
             elif self._assign_failed:
-                notes.append("有进程挂进 Job 失败过，内存上限对这台沙箱不成立。")
+                notes.append("assigning a process to the Job failed at least once, so the memory limit does not hold for this sandbox")
         return {
             "platform": sys.platform,
             "timeout": True,
@@ -400,9 +407,9 @@ class Sandbox:
             "notes": notes,
         }
 
-    # ---- 环境 ----------------------------------------------------------- #
+    # ---- environment --------------------------------------------------- #
     def _child_env(self) -> dict:
-        """**从空字典搭起**的子进程环境。父进程环境不是基底，是取用来源。"""
+        """The child environment, **built from an empty dict**. The parent environment is not the base, only a source to draw from."""
         env: dict[str, str] = {}
         for key in list(_BASE_ALLOW) + list(self.env_allow):
             if _denied(key):
@@ -411,37 +418,38 @@ class Sandbox:
             if val is not None:
                 env[key] = val
         env.setdefault("PATH", os.defpath)
-        # Windows 上 python 的 stdout 默认走 ANSI 代码页，打印非 ASCII 直接
-        # UnicodeEncodeError，外面看只是「输出为空」。POSIX 上给它不改变任何行为。
+        # On Windows python's stdout defaults to the ANSI code page, so printing non-ASCII raises
+        # UnicodeEncodeError, which from outside only looks like "empty output". On POSIX setting it changes nothing.
         env["PYTHONIOENCODING"] = "utf-8"
         env["PYTHONUNBUFFERED"] = "1"
-        # third_party/ 是编译目标，必须逐字节不变——不许在它旁边落 __pycache__。
+        # third_party/ is a compilation target and must stay byte-for-byte unchanged: no __pycache__ may land next to it.
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         work = str(self.workdir)
         for key in ("TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"):
             env[key] = work
         return env
 
-    # ---- 执行 ----------------------------------------------------------- #
+    # ---- execution ----------------------------------------------------- #
     def _resolve(self, script_rel: str) -> Path:
-        """把相对路径解到 ``root`` 之下，逃逸即 :class:`SandboxError`。"""
+        """Resolve a relative path under ``root``; an escape raises :class:`SandboxError`."""
         if not script_rel or not str(script_rel).strip():
-            raise SandboxError("脚本路径为空")
+            raise SandboxError("script path is empty")
         root = self.root.resolve()
         try:
             target = (root / str(script_rel)).resolve()
         except OSError as exc:
-            raise SandboxError(f"脚本路径解析失败 {script_rel!r}: {exc}") from exc
+            raise SandboxError(f"cannot resolve script path {script_rel!r}: {exc}") from exc
         if target != root and not target.is_relative_to(root):
-            raise SandboxError(f"脚本路径逃出技能根目录: {script_rel!r} → {target}")
+            raise SandboxError(f"script path escapes the skill root: {script_rel!r} → {target}")
         return target
 
     def run_script(self, script_rel: str, argv: Sequence[str]) -> ExecResult:
-        """跑 ``root/<script_rel>``，参数 ``argv`` 原样传给它。
+        """Run ``root/<script_rel>``, passing ``argv`` to it unchanged.
 
-        注意 ``math_verify.py`` 的 ``--json`` 必须排在子命令**前面**：
-        ``["--json", "equiv", a, b]`` 对，``["equiv", a, b, "--json"]`` 退出码 2。
-        这一层不替调用方重排——猜参数顺序一旦猜错，错法比原样传更难查。
+        Note that the ``--json`` of ``math_verify.py`` must come **before** the subcommand:
+        ``["--json", "equiv", a, b]`` is right, ``["equiv", a, b, "--json"]`` exits with 2.
+        This layer does not reorder arguments for the caller: a wrong guess about argument order fails in ways that are
+        harder to track down than passing them through unchanged.
         """
         script = self._resolve(script_rel)
         cmd = [self.python, str(script), *[str(a) for a in argv]]
@@ -451,27 +459,27 @@ class Sandbox:
         return self._spawn(cmd)
 
     def run_code(self, code: str, argv: Sequence[str] = ()) -> ExecResult:
-        """把一段 python 落成工作目录里的临时文件再跑。模型现写的代码走这条。
+        """Write a piece of python to a temporary file in the working directory, then run it. Model-written code goes this way.
 
-        落文件而不是 ``python -c``：traceback 里才有真实行号，而调试模型写的代码，
-        「第几行炸的」是最要紧的那一条信息。
+        A file rather than ``python -c``: only then does the traceback carry real line numbers, and when debugging code
+        a model wrote, "which line blew up" is the single most important piece of information.
         """
         self._ensure_ready()
         self._counter += 1
-        # 不碰全局 random：conftest 用固定种子钉了别处的注入率，这里取一个数就会错位。
+        # leave the global random alone: conftest pins injection rates elsewhere with a fixed seed; one draw here shifts them.
         path = self.workdir / f"_code_{os.getpid()}_{self._counter}.py"
         path.write_text(code, encoding="utf-8")
         cmd = [self.python, str(path), *[str(a) for a in argv]]
         return self._spawn(cmd)
 
     def _spawn(self, cmd: list[str]) -> ExecResult:
-        """起进程、等墙钟、超时就杀树，最后收结果。"""
+        """Start the process, wait on the wall clock, kill the tree on timeout, then collect the result."""
         self._ensure_ready()
         popen_kw: dict[str, Any] = {}
         if sys.platform == "win32":
             popen_kw["creationflags"] = subprocess.CREATE_NO_WINDOW
         else:
-            # 自成进程组，这样 killpg 一刀能带走它派生的全部后代。
+            # its own process group, so that a single killpg takes all of its descendants along.
             popen_kw["start_new_session"] = True
             preexec = _rlimit_preexec(self.mem_limit_mb)
             if preexec is not None:
@@ -481,14 +489,14 @@ class Sandbox:
         try:
             proc = subprocess.Popen(
                 cmd, cwd=str(self.workdir), env=self._child_env(),
-                stdin=subprocess.DEVNULL,          # 读 stdin 的子进程不许把我们挂住
+                stdin=subprocess.DEVNULL,          # a child reading stdin must not hang us
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, encoding="utf-8", errors="replace", **popen_kw)
         except OSError as exc:
             return ExecResult(False, ERROR_RC, "", f"{type(exc).__name__}: {exc}",
                               time.monotonic() - t0, False, cmd, OUTCOME_ERROR)
 
-        if self._job is not None:                  # pragma: no cover - 平台分支
+        if self._job is not None:                  # pragma: no cover - platform branch
             note = _win_assign_job(self._job, proc.pid)
             if note:
                 self._assign_failed = True
@@ -501,12 +509,12 @@ class Sandbox:
             out, err = self._drain(proc)
             dur = time.monotonic() - t0
             alive = pid_alive(proc.pid)
-            tail = "" if not alive else "（杀完之后它居然还活着，这条要当真事查）"
+            tail = "" if not alive else " (still alive after the kill; investigate this as a real problem)"
             return ExecResult(
                 False, TIMEOUT_RC, self._clip(out),
                 self._clip(f"timed out after {self.timeout_s}s{tail}\n{err}"),
                 dur, True, cmd, OUTCOME_TIMEOUT, proc.pid)
-        except Exception as exc:                   # noqa: BLE001 - 通信本身炸了
+        except Exception as exc:                   # noqa: BLE001 - the communication itself failed
             self._kill_tree(proc)
             return ExecResult(False, ERROR_RC, "", f"{type(exc).__name__}: {exc}",
                               time.monotonic() - t0, False, cmd, OUTCOME_ERROR, proc.pid)
@@ -517,15 +525,15 @@ class Sandbox:
                           OUTCOME_OK if rc == 0 else OUTCOME_NONZERO, proc.pid)
 
     def _kill_tree(self, proc: subprocess.Popen) -> None:
-        """把整棵进程树杀干净。只 kill 父进程不够：孙进程会活下来接着烧 CPU。"""
-        if sys.platform == "win32":                # pragma: no cover - 平台分支
+        """Kill the whole process tree. Killing only the parent is not enough: grandchildren survive and keep burning CPU."""
+        if sys.platform == "win32":                # pragma: no cover - platform branch
             try:
                 subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
                                capture_output=True, timeout=15,
                                creationflags=subprocess.CREATE_NO_WINDOW)
             except Exception:                      # noqa: BLE001
                 pass
-            if self._job is not None:              # Job 里的残留一并带走
+            if self._job is not None:              # take the leftovers in the Job along too
                 try:
                     _kernel32().TerminateJobObject(self._job, 1)
                 except Exception:                  # noqa: BLE001
@@ -540,16 +548,16 @@ class Sandbox:
         except OSError:
             pass
         try:
-            proc.wait(timeout=10)                  # 收尸，pid_alive 才问得出真话
+            proc.wait(timeout=10)                  # reap it, so that pid_alive tells the truth
         except Exception:                          # noqa: BLE001
             pass
 
     @staticmethod
     def _drain(proc: subprocess.Popen) -> tuple[str, str]:
-        """杀完之后把管道里剩下的读干净。
+        """After the kill, drain whatever is left in the pipes.
 
-        ``TimeoutExpired`` 本身**不带**已经产出的输出（win32 上由读取线程持有），必须在
-        杀掉之后再 communicate 一次才拿得到——不然一次超时在下游看起来就是「没有输出」。
+        ``TimeoutExpired`` itself does **not** carry the output produced so far (on win32 the reader threads hold it);
+        only one more communicate after the kill gets it. Otherwise a timeout looks like "no output" downstream.
         """
         try:
             out, err = proc.communicate(timeout=10)
@@ -558,7 +566,7 @@ class Sandbox:
             return "", ""
 
     def _clip(self, text: str) -> str:
-        """输出截断。模型写的循环 print 能刷出几百 MB，整条带进内存没有意义。"""
+        """Truncate output. A print loop in model-written code can emit hundreds of MB; keeping all of it in memory is pointless."""
         if len(text) <= self.max_output_chars:
             return text
-        return text[:self.max_output_chars] + f"\n...[截断，原长 {len(text)} 字符]"
+        return text[:self.max_output_chars] + f"\n...[truncated, original length {len(text)} characters]"

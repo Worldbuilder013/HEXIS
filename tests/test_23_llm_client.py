@@ -1,8 +1,9 @@
-"""env（.env 定位/解析）与 llm_client（OpenAI 兼容端点）的密闭测试。
+"""Sealed tests for env (.env discovery/parsing) and llm_client (OpenAI-compatible endpoint).
 
-**全程无网络**：所有 HTTP 都走 :class:`httpx.MockTransport`，退避 sleep 被换成记账函数，
-所以整份文件是毫秒级的。钉住的都是被真实端点教训过的行为——内联 ``<think>`` 必须剥、
-预算被推理吃光要救援且只救一次、哪些状态码值得重试、以及**任何地方都不许出现 API key**。
+**No network at all**: every HTTP request goes through :class:`httpx.MockTransport`, and the backoff sleep is
+replaced by a recording function, so the whole file runs in milliseconds. What is pinned here is behavior that
+real endpoints taught us the hard way -- inline ``<think>`` must be stripped, a budget eaten up by reasoning must
+be rescued exactly once, which status codes are worth retrying, and **the API key must never appear anywhere**.
 """
 
 from __future__ import annotations
@@ -31,12 +32,12 @@ FAKE_KEY = "sk-fake-secret-abcd1234"
 
 
 # --------------------------------------------------------------------------- #
-# 脚手架
+# Scaffolding
 # --------------------------------------------------------------------------- #
 def chat_response(content: str, *, finish_reason: str = "stop",
                   reasoning_content: str | None = None,
                   usage: dict | None = None) -> dict:
-    """一份真实形状的 /chat/completions 响应体。"""
+    """A /chat/completions response body with a realistic shape."""
     msg: dict = {"role": "assistant", "content": content}
     if reasoning_content is not None:
         msg["reasoning_content"] = reasoning_content
@@ -49,10 +50,10 @@ def chat_response(content: str, *, finish_reason: str = "stop",
 
 
 def make_client(responses, **kw):
-    """按 ``responses`` 依次应答的客户端。返回 ``(client, seen, sleeps)``。
+    """A client that answers with ``responses`` in order. Returns ``(client, seen, sleeps)``.
 
-    ``responses`` 的每一项是 ``(status, body)``、``httpx.Response``，或一个要抛的异常；
-    用完之后重复最后一项。``seen`` 收下每次请求的 payload，``sleeps`` 收下每次退避时长。
+    Each item of ``responses`` is a ``(status, body)``, an ``httpx.Response``, or an exception to raise; once
+    exhausted, the last item repeats. ``seen`` collects each request's payload, ``sleeps`` each backoff duration.
     """
     seen: list[dict] = []
     sleeps: list[float] = []
@@ -72,15 +73,15 @@ def make_client(responses, **kw):
 
     client = OpenAIClient("MiniMax-M2.5-highspeed", "https://api.example/v1", FAKE_KEY,
                           transport=httpx.MockTransport(handler), **kw)
-    client._sleep = sleeps.append          # 退避不真睡：测试要毫秒级
+    client._sleep = sleeps.append          # backoff does not really sleep: tests must run in milliseconds
     return client, seen, sleeps
 
 
 # --------------------------------------------------------------------------- #
-# env：.env 的定位与解析
+# env: discovering and parsing .env
 # --------------------------------------------------------------------------- #
 def test_find_env_stops_at_the_git_holder(tmp_path):
-    """走到拿着 .git 的那一层就收手——检出之外的 .env 永远不该被捡进来。"""
+    """The search stops at the directory holding .git -- a .env outside the checkout must never be picked up."""
     (tmp_path / "stray.env").write_text("X=1", encoding="utf-8")
     (tmp_path / ".env").write_text("API_KEY=outside-the-checkout", encoding="utf-8")
     repo = tmp_path / "repo"
@@ -88,10 +89,10 @@ def test_find_env_stops_at_the_git_holder(tmp_path):
     deep = repo / "pkg" / "sub"
     deep.mkdir(parents=True)
 
-    assert envmod.find_env_file(deep) is None          # 仓库里没有 .env → 不外捡
+    assert envmod.find_env_file(deep) is None          # no .env in the repository -> do not look outside
 
     (repo / ".env").write_text("MODEL=m", encoding="utf-8")
-    assert envmod.find_env_file(deep) == repo / ".env"  # 同层 .env 先于 .git 判定
+    assert envmod.find_env_file(deep) == repo / ".env"  # within one directory .env is checked before .git
 
 
 def test_find_env_accepts_a_file_as_start(tmp_path):
@@ -100,25 +101,25 @@ def test_find_env_accepts_a_file_as_start(tmp_path):
     (repo / ".env").write_text("MODEL=m", encoding="utf-8")
     f = repo / "pkg" / "mod.py"
     f.parent.mkdir(parents=True)
-    f.write_text("# 起点给文件时应从它所在目录起步", encoding="utf-8")
+    f.write_text("# when the start is a file, the search begins from its directory", encoding="utf-8")
     assert envmod.find_env_file(f) == repo / ".env"
 
 
 def test_find_env_default_start_is_this_checkout():
-    """默认起点是包自己所在处；本仓库根上确实有一份 .env（值不看、更不打印）。"""
+    """The default start is where the package itself lives; if this repository root has a .env it is found (its values are not read, let alone printed)."""
     found = envmod.find_env_file()
     if (ROOT / ".env").exists():
         assert found == ROOT / ".env"
-    else:                                              # CI 上靠环境变量注入也算合法
+    else:                                              # on CI, injecting environment variables is also legitimate
         assert found is None
 
 
 def test_load_env_parses_and_does_not_override(tmp_path):
     p = tmp_path / ".env"
     p.write_text(
-        "\n".join(["# 注释行", "", "MODEL=MiniMax-M2.5-highspeed",
+        "\n".join(["# comment line", "", "MODEL=MiniMax-M2.5-highspeed",
                    'BASE_URL="https://api.example/v1"', "API_KEY='sk-quoted'",
-                   "没有等号的一行"]),
+                   "a line without an equals sign"]),
         encoding="utf-8")
     fake_env = {"MODEL": "already-set"}
     parsed = envmod.load_env(path=p, environ=fake_env)
@@ -126,7 +127,7 @@ def test_load_env_parses_and_does_not_override(tmp_path):
     assert parsed == {"MODEL": "MiniMax-M2.5-highspeed",
                       "BASE_URL": "https://api.example/v1",
                       "API_KEY": "sk-quoted"}
-    assert fake_env["MODEL"] == "already-set"          # 默认不覆盖
+    assert fake_env["MODEL"] == "already-set"          # no override by default
     assert fake_env["BASE_URL"] == "https://api.example/v1"
 
     envmod.load_env(path=p, environ=fake_env, override=True)
@@ -141,7 +142,7 @@ def test_llm_config_names_the_missing_key_without_printing_values():
     with pytest.raises(envmod.EnvError) as ei:
         envmod.llm_config(environ={"MODEL": "m", "BASE_URL": "u", "API_KEY": "  "})
     msg = str(ei.value)
-    assert "API_KEY" in msg and "MODEL" not in msg     # 只点名缺的那个
+    assert "API_KEY" in msg and "MODEL" not in msg     # names only the missing one
 
     cfg = envmod.llm_config(environ={"MODEL": "m", "BASE_URL": "u",
                                      "API_KEY": FAKE_KEY})
@@ -153,14 +154,14 @@ def test_config_never_shows_the_key():
     cfg = envmod.LLMConfig(model="m", base_url="u", api_key=FAKE_KEY)
     for s in (repr(cfg), str(cfg), cfg.redacted()):
         assert FAKE_KEY not in s
-    assert cfg.redacted().endswith("1234")             # 末 4 位是允许露的全部
+    assert cfg.redacted().endswith("1234")             # the last 4 characters are all that may show
 
 
 # --------------------------------------------------------------------------- #
-# 内联思维链
+# Inline chain of thought
 # --------------------------------------------------------------------------- #
 def test_split_inline_thinking_on_a_minimax_shaped_reply():
-    """MiniMax 把 <think> 内联在 content 里：text 必须是干净答案，reasoning 装推理。"""
+    """MiniMax inlines <think> in content: text must be the clean answer, and reasoning holds the reasoning."""
     content = ("<think>\nLet me compute 6*7. 6*7 = 42. The answer is 42.\n</think>\n\n"
                "The answer is $\\boxed{42}$.")
     client, seen, _ = make_client([(200, chat_response(
@@ -179,7 +180,7 @@ def test_split_inline_thinking_on_a_minimax_shaped_reply():
 
 
 def test_split_inline_thinking_unclosed_block_yields_no_answer():
-    """未闭合的思考块整段算推理：里面没有答案可捞，交半段推理是不诚实的。"""
+    """An unclosed think block counts entirely as reasoning: there is no answer in it, and handing over half the reasoning would be dishonest."""
     text, reasoning = _split_inline_thinking("<think>still thinking about it")
     assert text == ""
     assert reasoning == "<think>still thinking about it"
@@ -187,7 +188,7 @@ def test_split_inline_thinking_unclosed_block_yields_no_answer():
 
 
 def test_separate_reasoning_content_field_is_used():
-    """DeepSeek 式的单独字段也要认，且优先于内联块。"""
+    """A DeepSeek-style separate field is accepted too, and takes precedence over the inline block."""
     client, _, _ = make_client([(200, chat_response(
         "the answer", reasoning_content="internal chain of thought"))])
     comp = client.complete("q")
@@ -196,17 +197,17 @@ def test_separate_reasoning_content_field_is_used():
 
 
 def test_usage_absent_means_none_not_zero():
-    """没报 usage 就是 None——估算冒充测量比不报还糟。"""
+    """No usage reported means None -- an estimate posing as a measurement is worse than nothing."""
     client, _, _ = make_client([(200, chat_response("hi"))])
     comp = client.complete("q")
     assert comp.prompt_tokens is None and comp.completion_tokens is None
 
 
 # --------------------------------------------------------------------------- #
-# 截断救援
+# Truncation rescue
 # --------------------------------------------------------------------------- #
 def test_length_truncation_retries_once_with_a_bigger_budget():
-    """预算被推理吃光（finish_reason=length + 空答案）→ 加 4 倍预算重试一次并留痕。"""
+    """A budget eaten up by reasoning (finish_reason=length + empty answer) -> retry once with 4x the budget and leave a mark."""
     starved = chat_response("<think>reasoning that never finishes",
                             finish_reason="length")
     rescued = chat_response("<think>short</think>\n\\boxed{42}")
@@ -215,19 +216,19 @@ def test_length_truncation_retries_once_with_a_bigger_budget():
     comp = client.complete("hard question", max_tokens=512)
 
     assert client.n_requests == 2
-    assert [p["max_tokens"] for p in seen] == [512, 2048]     # 4 倍
+    assert [p["max_tokens"] for p in seen] == [512, 2048]     # 4x
     assert comp.text == "\\boxed{42}"
     assert comp.retried_for_length is True
 
 
 def test_length_retry_fires_exactly_once_and_never_hides_the_empty_answer():
-    """再空也不再重试：把 length + 空答案连同旗子交出去，让调用方看得见。"""
+    """Still empty means no further retry: hand over length + empty answer together with the flag, so the caller can see it."""
     starved = chat_response("<think>never finishes", finish_reason="length")
     client, seen, _ = make_client([(200, starved)])
 
     comp = client.complete("q", max_tokens=256)
 
-    assert client.n_requests == 2                              # 只救一次
+    assert client.n_requests == 2                              # rescued only once
     assert comp.text == "" and comp.finish_reason == "length"
     assert comp.retried_for_length is True and comp.truncated_empty is True
 
@@ -239,7 +240,7 @@ def test_no_length_retry_when_the_answer_is_present():
 
 
 def test_no_length_retry_at_the_ceiling():
-    """已经顶到天花板就不再加倍——否则每次调用都白烧一次预算。"""
+    """Already at the ceiling means no more multiplying -- otherwise every call would burn one extra budget for nothing."""
     starved = chat_response("<think>...", finish_reason="length")
     client, _, _ = make_client([(200, starved)], max_tokens_ceiling=256)
     comp = client.complete("q", max_tokens=256)
@@ -247,14 +248,14 @@ def test_no_length_retry_at_the_ceiling():
 
 
 # --------------------------------------------------------------------------- #
-# 重试策略
+# Retry policy
 # --------------------------------------------------------------------------- #
 def test_429_then_200_succeeds_after_a_backoff():
     client, _, sleeps = make_client([(429, "rate limited"), (200, chat_response("ok"))])
     comp = client.complete("q")
     assert comp.text == "ok"
     assert client.n_requests == 2
-    assert len(sleeps) == 1 and sleeps[0] > 0                  # 退了一次，退避为正
+    assert len(sleeps) == 1 and sleeps[0] > 0                  # backed off once, with a positive delay
 
 
 def test_400_raises_immediately_without_retrying():
@@ -262,7 +263,7 @@ def test_400_raises_immediately_without_retrying():
     with pytest.raises(LLMHTTPError) as ei:
         client.complete("q")
     assert ei.value.status_code == 400
-    assert client.n_requests == 1 and sleeps == []             # 一次都不重试
+    assert client.n_requests == 1 and sleeps == []             # no retry at all
 
 
 @pytest.mark.parametrize("status", [401, 403, 404, 422])
@@ -285,23 +286,23 @@ def test_transport_errors_are_retried_then_give_up():
                                     max_retries=3)
     with pytest.raises(LLMError) as ei:
         client.complete("q")
-    assert client.n_requests == 3                              # 用满次数
-    assert len(sleeps) == 2                                    # 最后一次不再睡
+    assert client.n_requests == 3                              # all attempts used
+    assert len(sleeps) == 2                                    # no sleep after the last attempt
     assert "connection reset" in str(ei.value)
 
 
 def test_backoff_uses_a_private_rng(monkeypatch):
-    """抖动不许消费全局随机流：test_10 那边钉着按种子注入的误差率。"""
+    """Jitter must not consume the global random stream: the calibration test (tests/legacy/test_10_calibrate.py) pins seeded error-rate injection."""
     import random as _random
 
     monkeypatch.setattr(_random, "random",
-                        lambda: pytest.fail("动了全局随机流"))
+                        lambda: pytest.fail("touched the global random stream"))
     client, _, _ = make_client([(503, "boom"), (200, chat_response("ok"))])
     assert client.complete("q").text == "ok"
 
 
 # --------------------------------------------------------------------------- #
-# JSON 抽取
+# JSON extraction
 # --------------------------------------------------------------------------- #
 def test_extract_json_from_a_fence():
     text = 'Sure thing:\n```json\n{"label": "yes", "why": "because"}\n```\nHope it helps.'
@@ -318,7 +319,7 @@ def test_extract_json_from_prose_and_nested_braces():
 
 
 def test_extract_json_ignores_braces_inside_the_think_block():
-    """草稿纸上的花括号比答案先出现——不剥思维链就会捞到它。"""
+    """Braces on the scratch paper appear before the answer -- without stripping the chain of thought we would fish that one out."""
     text = '<think>maybe {"label": "no"} is right</think>\n{"label": "yes"}'
     assert extract_json(text) == {"label": "yes"}
 
@@ -332,7 +333,7 @@ def test_extract_json_returns_none_when_there_is_none():
 # ModelAdapter
 # --------------------------------------------------------------------------- #
 def test_adapter_matches_the_model_protocol_signatures():
-    """签名必须和 ScriptedModel 一模一样，runtime.run_task 才能原地换人。"""
+    """The signatures must be identical to ScriptedModel's so runtime.run_task can swap one for the other in place."""
     client, _, _ = make_client([(200, chat_response("x"))])
     adapter = ModelAdapter(client)
     assert isinstance(adapter, Model)
@@ -345,25 +346,25 @@ def test_classify_returns_the_label_from_json():
     client, seen, _ = make_client([(200, chat_response(
         '<think>looks messy</think>\n{"label": "dirty"}'))])
     adapter = ModelAdapter(client, seed=7)
-    got = adapter.classify(prompt="表头干净吗？", values={"n": 3},
-                           labels=["clean", "dirty", "弃权"])
+    got = adapter.classify(prompt="Is the header clean?", values={"n": 3},
+                           labels=["clean", "dirty", "abstain"])
     assert got == "dirty"
     assert seen[0]["seed"] == 7 and seen[0]["temperature"] == 0.0
 
 
 @pytest.mark.parametrize("reply", [
-    "purple",                                  # 标签集之外
-    "```json\n{\"label\": \"maybe\"}\n```",    # 会解析，但标签不在集里
-    "…………",                                    # 纯噪声
-    "",                                        # 空回复
-    "could be clean or dirty, hard to say",     # 裸文本提到两个，不猜
+    "purple",                                  # outside the label set
+    "```json\n{\"label\": \"maybe\"}\n```",    # parses, but the label is not in the set
+    "…………",                                    # pure noise
+    "",                                        # empty reply
+    "could be clean or dirty, hard to say",     # bare text mentions two labels: do not guess
 ])
 def test_classify_falls_back_to_abstain_on_offlist_or_garbage(reply):
-    """解析不出、或回了集外的东西，一律弃权——绝不发明一个标签让机器沿无依据的边走。"""
+    """Unparseable, or something outside the set: always abstain -- never invent a label that sends the machine down an ungrounded edge."""
     client, _, _ = make_client([(200, chat_response(reply))])
     adapter = ModelAdapter(client)
-    labels = ["clean", "dirty", "弃权"]
-    assert adapter.classify(prompt="q", values={}, labels=labels) == "弃权"
+    labels = ["clean", "dirty", "abstain"]
+    assert adapter.classify(prompt="q", values={}, labels=labels) == "abstain"
 
 
 def test_classify_never_raises_when_the_endpoint_fails():
@@ -379,7 +380,7 @@ def test_generate_returns_the_object_and_accounts_tokens():
         '<think>step</think>\n{"kind": "tool", "name": "read_table"}',
         usage={"prompt_tokens": 10, "completion_tokens": 4}))])
     adapter = ModelAdapter(client)
-    out = adapter.generate(prompt="SKILL.md 全文", values={"path": "a.csv"},
+    out = adapter.generate(prompt="full text of SKILL.md", values={"path": "a.csv"},
                            history=({"step": 1},))
     assert out == {"kind": "tool", "name": "read_table"}
     assert adapter.usage() == {"llm_calls": 1, "prompt_tokens": 10,
@@ -403,13 +404,13 @@ def test_usage_counts_unmeasured_calls_honestly():
 
 
 # --------------------------------------------------------------------------- #
-# 密钥不外泄
+# The API key never leaks
 # --------------------------------------------------------------------------- #
 def test_the_api_key_never_appears_in_reprs_or_errors():
-    """repr/str/异常消息里都不许出现 key——服务端回显它也要在出门前抹掉。"""
+    """The key must not appear in repr/str/exception messages -- even when the server echoes it, it is erased before leaving."""
     client, _, _ = make_client([(401, f"invalid api key: {FAKE_KEY}")])
     for s in (repr(client), str(client)):
-        assert FAKE_KEY not in s and "***1234" in s            # 只露末 4 位
+        assert FAKE_KEY not in s and "***1234" in s            # only the last 4 characters show
 
     with pytest.raises(LLMHTTPError) as ei:
         client.complete("q")
@@ -429,7 +430,7 @@ def test_giving_up_after_retries_also_scrubs_the_key():
 
 
 def test_the_key_only_travels_in_the_authorization_header():
-    """key 只进 header，绝不进 body——body 是会被记进日志和轨迹的那一半。"""
+    """The key only goes into the header, never the body -- the body is the half that gets written to logs and traces."""
     seen_headers: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

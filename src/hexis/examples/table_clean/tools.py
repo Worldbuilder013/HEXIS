@@ -1,10 +1,12 @@
-"""table_clean 玩具技能的三个确定性假工具，跑在一个内存文件系统上。
+"""Three deterministic fake tools for the table_clean toy skill, running on an in-memory file system.
 
-工具是纯函数式的：``input`` dict 进、``output`` dict 出，同输入同输出，不碰真磁盘、不联网、
-毫秒级。「文件」是一个 ``dict[path -> {header, rows}]``（:class:`MemFS`），由任务生成器
-预置。工具**忠实执行**——``export`` 即便目标就是原文件也照写不误；「不得覆盖原文件」这条
-禁止性要求由评判侧（prohibition）拦，不在工具里拦。这条分工是有意的：工具只管做，纪律
-由机器的结构与评判来守。
+The tools are purely functional: an ``input`` dict goes in and an ``output`` dict comes out, the
+same input always gives the same output, and they never touch the real disk or the network and run
+in milliseconds. A "file" is a ``dict[path -> {header, rows}]`` (:class:`MemFS`) pre-populated by
+the task generator. The tools **execute faithfully**: ``export`` writes even when the target is the
+source file; the prohibition "never overwrite the source file" is enforced on the judging side
+(prohibition), not inside the tool. This division of labor is intentional: tools only do the work,
+and discipline is kept by the machine's structure and by judging.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ BAD_MARK = "Unnamed"
 
 
 def is_canonical(header_row: str) -> bool:
-    """规范判据（对应 SKILL.md S2.1）：逗号分隔、每个字段非空、不含 ``Unnamed``。"""
+    """Well-formedness criterion (matches SKILL.md S2.1): comma-separated, every field non-empty, no ``Unnamed``."""
     if not header_row:
         return False
     fields = header_row.split(",")
@@ -25,19 +27,21 @@ def is_canonical(header_row: str) -> bool:
 
 
 def _fix_once(header_row: str) -> str:
-    """把**第一个**坏字段（空或含 Unnamed）改成 ``列{i}``。一次修一个：坏字段多就要多修
-    几次，修复成环因此有真实的圈数（1..k），而不是一步到位。确定性：同一坏表头同一修法。
+    """Rename the **first** bad field (empty or containing Unnamed) to ``column{i}``. One fix at a
+    time: a header with more bad fields needs more fixes, so the repair loop has a real iteration
+    count (1..k) instead of finishing in one step. Deterministic: the same bad header is always
+    fixed the same way.
     """
     fields = header_row.split(",")
     for i, f in enumerate(fields):
         if not f.strip() or BAD_MARK in f:
-            fields[i] = f"列{i + 1}"
+            fields[i] = f"column{i + 1}"
             break
     return ",".join(fields)
 
 
 class MemFS:
-    """内存文件系统：``path -> {'header': [...], 'rows': [...]}``。"""
+    """In-memory file system: ``path -> {'header': [...], 'rows': [...]}``."""
 
     def __init__(self, files: Optional[dict] = None):
         self.files: dict[str, dict] = {}
@@ -46,19 +50,19 @@ class MemFS:
                                 "rows": [list(r) for r in tbl.get("rows", [])]}
 
     def snapshot(self) -> dict:
-        """深拷贝当前状态，供验收比对「原文件有没有被动过」。"""
+        """Deep-copy the current state, so acceptance can check whether the source file was touched."""
         return {p: {"header": list(t["header"]),
                     "rows": [list(r) for r in t["rows"]]}
                 for p, t in self.files.items()}
 
 
 def build_registry(fs: MemFS) -> ToolRegistry:
-    """把三个工具绑定到一个 :class:`MemFS`，返回可直接喂给 runtime 的 :class:`ToolRegistry`。"""
+    """Bind the three tools to a :class:`MemFS` and return a :class:`ToolRegistry` that can be fed straight to runtime."""
 
     def read_csv(inp: dict) -> dict:
         path = inp["path"]
         if path not in fs.files:
-            return {"error": f"文件不存在: {path}"}
+            return {"error": f"file not found: {path}"}
         tbl = fs.files[path]
         return {"ok": True, "header_row": ",".join(tbl["header"]),
                 "rows": [list(r) for r in tbl["rows"]]}
@@ -67,7 +71,7 @@ def build_registry(fs: MemFS) -> ToolRegistry:
         return {"ok": True, "header_row": _fix_once(inp["header_row"])}
 
     def export(inp: dict) -> dict:
-        """把 header_row + rows 写到 output_path。**忠实执行**——即便覆盖 source_path。"""
+        """Write header_row + rows to output_path. **Executes faithfully**, even if that overwrites source_path."""
         out = inp["output_path"]
         header = str(inp.get("header_row", "")).split(",")
         rows = inp.get("rows", [])

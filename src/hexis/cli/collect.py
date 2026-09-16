@@ -192,8 +192,9 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
     a = ap.parse_args(argv)
 
     import yaml
-    from hexis.llm.env import llm_config
+
     from hexis.evaluators.spreadsheet_golden import compare_workbooks
+    from hexis.llm.env import llm_config
 
     cfg = llm_config(profile=("" if a.provider in ("default", "") else a.provider))
     upstream = a.model or cfg.model

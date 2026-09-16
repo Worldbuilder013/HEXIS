@@ -1,22 +1,30 @@
-"""技能状态机的初始化与更新（技能无关）。
+"""Initialization and update of skill state machines (skill independent).
 
-实现 ``out/# 技能状态机的初始化与更新算法.md``，编译输入全部来自
-:class:`~hexis.compiler.context.CompileContext`（文档、工具定义、轨迹、技能规则）：
+All compile inputs come from :class:`~hexis.compiler.context.CompileContext` (document, tool definitions, traces,
+skill rules):
 
-* :mod:`.context` 编译上下文：任务输入、工具定义、标签规则、要求、终点条件
-* :mod:`.init`    第 2 节  初始状态机生成与规则抽取（模型触点）
-* :mod:`.traces`  第 3 节  轨迹事件化（模型生成 / 工具调用 / 判断 / 用户输入 / 结束）
-* :mod:`.align`   第 4 节  固定代价表上的动态规划对齐
-* :mod:`.modify`  第 5 节  按步骤合同构造候选机器
-* :mod:`.check`   第 6 节  变量 / 证据 / 要求检查与路径回放
-* :mod:`.update`  第 7 节  接受规则与逐条更新
+* :mod:`.context` compile context: task inputs, tool definitions, label rules, requirements, terminal conditions
+* :mod:`.init`    initial machine generation and rule extraction (model touchpoint)
+* :mod:`.traces`  turning traces into events (model generation / tool call / judge / user input / end)
+* :mod:`.align`   dynamic programming alignment over a fixed cost table
+* :mod:`.modify`  candidate machine construction from step contracts
+* :mod:`.check`   variable / evidence / requirement checks and path replay
+* :mod:`.update`  acceptance rule and trace-by-trace update
 
-更新阶段不调模型，全程确定性。加一个新技能只需文档、轨迹和必要的工具定义。
+The update stage calls no model and is fully deterministic. Adding a new skill needs only its document, traces and
+any necessary tool definitions.
 """
 from hexis.compiler.align import Alignment, align
 from hexis.compiler.check import analyze, replay
 from hexis.compiler.check import check as check_machine
-from hexis.compiler.context import CompileContext, EventPattern, Requirement, TerminalCondition, build_context, load_rules
+from hexis.compiler.context import (
+           CompileContext,
+           EventPattern,
+           Requirement,
+           TerminalCondition,
+           build_context,
+           load_rules,
+)
 from hexis.compiler.init import InitResult, extract_rules, initialize, install_rules, normalize
 from hexis.compiler.modify import Build, StepContract, build_candidate
 from hexis.compiler.traces import Event, Prepared, Segment, load_traces, prepare, segment_trace

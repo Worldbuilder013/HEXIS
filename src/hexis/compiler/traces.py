@@ -1,15 +1,18 @@
-"""轨迹预处理（算法文档第 3 节，事件化）。
+"""Trace preprocessing (turning records into events).
 
-轨迹按文件名顺序读取。每条记录折成一个**事件**，五种：模型生成、工具调用、判断结果、
-用户输入、任务结束。每个事件保留自己的输入、输出与前后依赖；工具名保持原样，不合并、不换名。
-认不出的记录类型不会被丢掉：整条轨迹标为「含无法识别的事件」，不参与更新。
+Traces are read in file name order. Every record folds into an **event** of one of five kinds: model generation,
+tool call, judge result, user input, task end. Every event keeps its own input, output and dependencies; tool names
+are kept verbatim, never merged or renamed. Records of an unrecognized kind are not dropped: the whole trace is
+marked as "containing unrecognized events" and does not take part in the update.
 
-* 同一工具、同一基础标签的连续调用合并成一个事件（多次调用 = 循环需求）。
-* 基础标签只对通用命令类工具按「有没有写操作」分 apply / probe；其他工具用注册表给的标签。
-  此外一律空。**派生标签**（比如「修改之后读产出」）全部来自技能规则（见 :mod:`.context`）。
-* 模型事件分 narration（两次操作之间的叙述，附到下一个事件的意图里）和 output（结构化产出，
-  或结束前的最后一段生成）。后者是可观察事件。
-* 结束类别 τ*(T) 由技能的终点条件决定；轨迹声明的终点与证据不符即违规。
+* Consecutive calls of the same tool with the same base label merge into one event (several calls = a loop need).
+* Base labels split only generic command tools into apply / probe, by "whether there is a write operation"; other
+  tools use the label given by the registry; otherwise the label is empty. **Derived labels** (such as "read the
+  output after a modification") all come from skill rules (see :mod:`.context`).
+* Model events are narration (text between two operations, attached to the intent of the next event) or output
+  (structured output, or the last generation before the end). The latter are observable events.
+* The end class τ*(T) is determined by the skill's terminal conditions; a trace whose claimed terminal disagrees
+  with the evidence is a violation.
 """
 from __future__ import annotations
 
@@ -19,13 +22,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Optional, Sequence
 
+from hexis.compiler.context import CompileContext, apply_labels, check_requirements, terminal_for
 from hexis.machine import cond as _cond
-from hexis.traces import judge as _judge
-from hexis.traces import phases as _phases
 from hexis.machine.schema import Machine, Trace
 from hexis.tools.toolspec import ToolSpec
+from hexis.traces import judge as _judge
+from hexis.traces import phases as _phases
 from hexis.traces.trace_adapter import load_any_trace, tool_output
-from hexis.compiler.context import CompileContext, apply_labels, check_requirements, terminal_for
 
 EVENT_KINDS = ("tool", "model", "judge", "user", "end")
 
@@ -43,16 +46,16 @@ class Call:
 class Event:
     kind: str                                   # tool / model / judge / user / end
     index: int = 0
-    tool: str = ""                              # tool 事件
-    label: str = ""                             # 基础标签
-    labels: set = field(default_factory=set)    # 派生标签
-    calls: list = field(default_factory=list)   # tool 事件的全部调用
-    role: str = ""                              # model 事件：narration / output
-    text: str = ""                              # model 事件的正文 / user 事件的输入
-    output: dict = field(default_factory=dict)  # model / judge 事件的产出
-    step: int = 0                               # 非 tool 事件的记录步号
-    terminal: str = ""                          # end 事件声明的终点
-    intent: str = ""                            # 附上来的叙述
+    tool: str = ""                              # tool events
+    label: str = ""                             # base label
+    labels: set = field(default_factory=set)    # derived labels
+    calls: list = field(default_factory=list)   # all calls of a tool event
+    role: str = ""                              # model events: narration / output
+    text: str = ""                              # body of a model event / input of a user event
+    output: dict = field(default_factory=dict)  # output of model / judge events
+    step: int = 0                               # record step number of non-tool events
+    terminal: str = ""                          # terminal claimed by an end event
+    intent: str = ""                            # attached narration
 
     @property
     def ok(self) -> bool:
@@ -100,8 +103,8 @@ class Prepared:
     events: list = field(default_factory=list)
     notes: list = field(default_factory=list)
     unsupported: list = field(default_factory=list)      # [(step, kind)]
-    claims: str = ""                                     # 轨迹自己声明的终点
-    tau: str = ""                                        # 按终点条件算出的结束类别
+    claims: str = ""                                     # terminal claimed by the trace itself
+    tau: str = ""                                        # end class computed from the terminal conditions
     evidence: set = field(default_factory=set)
     violation: Optional[str] = None
     requirement_violations: list = field(default_factory=list)
@@ -116,7 +119,7 @@ class Prepared:
         return [e for e in self.events if e.kind == "tool"]
 
     def obs(self) -> list[tuple]:
-        """Obs(T)：可观察事件序列，(类型, 名字, 成败)，末尾 (end, τ*)。"""
+        """Obs(T): the observable event sequence as (kind, name, outcome), ending with (end, τ*)."""
         out: list[tuple] = []
         for e in self.observable:
             if e.kind == "tool":
@@ -139,7 +142,8 @@ def _dumps(v: Any) -> str:
 
 
 def _restore_code(inp: dict, meta: dict) -> dict:
-    """采集时抽走的代码正文（meta.code_bodies）放回入参；参数只用于记录不用于比较。"""
+    """Put the code bodies extracted during collection (meta.code_bodies) back into the arguments; the arguments are
+    only for the record, not for comparison."""
     bodies = meta.get("code_bodies") if isinstance(meta, dict) else None
     if not isinstance(bodies, dict):
         return inp
@@ -152,7 +156,8 @@ def _restore_code(inp: dict, meta: dict) -> dict:
 
 
 def base_label(tool: str, inp: Mapping, spec: ToolSpec) -> str:
-    """基础标签。通用命令类工具按写操作分 apply / probe；其余按注册表；再无则空。"""
+    """Base label. Generic command tools are split into apply / probe by write operations; others follow the
+    registry; otherwise empty."""
     if tool.lower() in _phases.GENERIC_TOOLS:
         text = _phases.command_text(inp)
         if text.strip():
@@ -161,7 +166,8 @@ def base_label(tool: str, inp: Mapping, spec: ToolSpec) -> str:
 
 
 def call_ok(spec: ToolSpec, out: Mapping) -> bool:
-    """一次调用成败：按工具的成功判据在产出上求值；判据缺失或求不出按成功。"""
+    """Outcome of one call: evaluate the tool's success condition on the output; a missing or unevaluable condition
+    counts as success."""
     if not spec.success:
         return True
     try:
@@ -171,7 +177,7 @@ def call_ok(spec: ToolSpec, out: Mapping) -> bool:
 
 
 def segment_trace(trace: Trace, ctx: CompileContext) -> tuple[list, list, list]:
-    """轨迹 → 事件序列。返回 (事件, 说明, 无法识别的记录)。"""
+    """Trace → event sequence. Returns (events, notes, unrecognized records)."""
     events: list[Event] = []
     notes: list[str] = []
     unsupported: list = []
@@ -207,7 +213,7 @@ def segment_trace(trace: Trace, ctx: CompileContext) -> tuple[list, list, list]:
             pending = []
             continue
         if kind != "tool":
-            unsupported.append((r.step, kind or "(空)"))
+            unsupported.append((r.step, kind or "(empty)"))
             continue
         name = str(act.get("name") or "")
         spec = ctx.spec(name)
@@ -217,7 +223,8 @@ def segment_trace(trace: Trace, ctx: CompileContext) -> tuple[list, list, list]:
         ok = call_ok(spec, out)
         label = base_label(name, inp, spec)
         call = Call(step=r.step, input=inp, output=out, ok=ok, narration=" ".join(pending))
-        # 同工具、同标签的连续调用合并；中间只隔着叙述（不是产出）的也算连续
+        # merge consecutive calls with the same tool and label; calls separated only by narration (not output) count as
+        # consecutive
         prev = None
         for cand in reversed(events):
             if cand.kind == "model" and cand.role == "narration":
@@ -233,8 +240,8 @@ def segment_trace(trace: Trace, ctx: CompileContext) -> tuple[list, list, list]:
                                 intent=" ".join(pending)))
         pending = []
     if pending and not (events and events[-1].kind == "end"):
-        notes.append(f"末尾 {len(pending)} 句叙述后面没有任何事件")
-    # 结束前的最后一段模型生成是交付内容（output），中间的是叙述
+        notes.append(f"{len(pending)} trailing narration passages are not followed by any event")
+    # the last model generation before the end is the deliverable (output); earlier ones are narration
     last_model = None
     for i, ev in enumerate(events):
         if ev.kind == "model":
@@ -249,7 +256,7 @@ def segment_trace(trace: Trace, ctx: CompileContext) -> tuple[list, list, list]:
 
 
 def prepare(trace: Trace, ctx: CompileContext, *, source: str = "") -> Prepared:
-    """一条轨迹的全部预处理结果：事件、派生标签、要求检查、结束类别、违规。"""
+    """All preprocessing results for one trace: events, derived labels, requirement checks, end class, violation."""
     tid = str(trace.task.get("task_id") or Path(source).stem) if isinstance(trace.task, dict) else source
     task_in = dict((trace.task.get("input") if isinstance(trace.task, dict) else None) or {})
     events, notes, unsupported = segment_trace(trace, ctx)
@@ -259,19 +266,20 @@ def prepare(trace: Trace, ctx: CompileContext, *, source: str = "") -> Prepared:
         return p
     if events[-1].kind != "end":
         events.append(Event(kind="end", index=len(events), terminal=""))
-        p.notes.append("轨迹没有结束记录，补一个结束事件")
+        p.notes.append("trace has no end record, appended an end event")
     apply_labels(events, ctx, task_in)
     p.requirement_violations = check_requirements(events, ctx, task_in)
     p.tau, p.evidence = terminal_for(events, ctx, task_in)
     p.claims = events[-1].terminal
     conditioned = set(ctx.conditioned_terminals())
     if p.claims in conditioned and p.claims != p.tau:
-        p.violation = f"声明到达 {p.claims}，但证据只支持 {p.tau}"
+        p.violation = f"claimed to reach {p.claims}, but the evidence only supports {p.tau}"
     return p
 
 
 def load_traces(tdir: Path, *, phase_rules: str = "") -> list[tuple[Path, Optional[Trace], str]]:
-    """按文件名顺序读目录里的 *.jsonl。读不动的 (path, None, 错误)。不做阶段分类：标签由本模块定。"""
+    """Read the *.jsonl files of a directory in file name order. Unreadable ones become (path, None, error). No phase
+    classification: labels are decided by this module."""
     out: list = []
     for f in sorted(Path(tdir).glob("*.jsonl")):
         try:
@@ -282,7 +290,7 @@ def load_traces(tdir: Path, *, phase_rules: str = "") -> list[tuple[Path, Option
 
 
 def violates_prohibitions(trace: Trace, machine: Machine) -> Optional[str]:
-    """外部禁止规则（机器的 prohibitions）。触犯返回原因。"""
+    """External prohibition rules (the machine's prohibitions). Returns the reason when one is violated."""
     if not machine.prohibitions:
         return None
     v = _judge.evaluate(trace, None, list(machine.prohibitions))
@@ -290,7 +298,8 @@ def violates_prohibitions(trace: Trace, machine: Machine) -> Optional[str]:
 
 
 def end_state_for(machine: Machine, terminal: str) -> str:
-    """结束类别（终点 id）→ 结束状态：对应终点；缺少时非回退终点；再没有就回退状态。"""
+    """End class (terminal id) → end state: the state of that terminal; if missing, a non-fallback terminal; failing
+    that, the fallback state."""
     kinds = terminal_kinds(machine)
     for sid, st in machine.states.items():
         if st.action.kind == "end" and st.action.terminal == terminal:

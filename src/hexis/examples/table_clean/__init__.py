@@ -1,14 +1,21 @@
-"""table_clean —— 一个密闭、秒级的玩具技能，用来自测整套 hexis 流程。
+"""table_clean: a hermetic toy skill that runs in seconds, used to self-test the whole hexis pipeline.
 
-读一张 CSV、检查并（必要时逐处修复）表头、导出，带一条「不得覆盖原文件」的禁止性要求。
-三个工具是内存纯函数，模型是脚本桩，任务由生成器造，全程无网络、可复现。
+It reads a CSV, checks the header (repairing it one spot at a time when needed) and exports the
+table, with one prohibition: "never overwrite the source file". The three tools are in-memory pure
+functions, the model is a scripted stub and tasks come from a generator, so every run is offline
+and reproducible.
 """
 
 from pathlib import Path
 
 from hexis.examples.table_clean.acceptance import verify
 from hexis.examples.table_clean.scripted import (
-    JUDGE_Q, LABELS, build_model, gen_tasks, interpret, make_judge,
+    JUDGE_Q,
+    LABELS,
+    build_model,
+    gen_tasks,
+    interpret,
+    make_judge,
     reference_machine,
 )
 from hexis.examples.table_clean.tools import MemFS, build_registry, is_canonical
@@ -17,7 +24,7 @@ SKILL_PATH = Path(__file__).with_name("SKILL.md")
 
 
 def skill_doc() -> str:
-    """SKILL.md 的私有正文（FALLBACK 解释执行时模型读的就是它）。"""
+    """The private body of SKILL.md (this is what the model reads when interpreting under FALLBACK)."""
     return SKILL_PATH.read_text(encoding="utf-8")
 
 

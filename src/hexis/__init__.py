@@ -2,14 +2,17 @@
 
 A machine keeps the current state and a set of variables, executes the operation assigned to the current
 state and evaluates guards over the variables to choose the next state; models are only called inside
-states. Main modules:
+states. Subpackages:
 
-* :mod:`hexis.machine.schema`: machine and trace data model;
-* :mod:`hexis.execution.runtime`: interpreter with retries and fallback to interpreted execution;
-* :mod:`hexis.compiler`: compiler (compile context, initialization, trace update, stepwise update);
-* :mod:`hexis.llm.llm_client`, :mod:`hexis.tools.opencode_tools`, :mod:`hexis.tools.local_tools`: model and tool backends;
+* :mod:`hexis.machine`: the efsm-v1 machine and trace model, the guard language, structural checks;
+* :mod:`hexis.compiler`: compile context, initialization, trace update, stepwise decisions;
+* :mod:`hexis.execution`: the runtime interpreter with retries and fallback to interpreted execution;
+* :mod:`hexis.llm`, :mod:`hexis.tools`, :mod:`hexis.traces`: model access, tool backends, trace formats;
+* :mod:`hexis.builddir`, :mod:`hexis.updater`, :mod:`hexis.step_judge`, :mod:`hexis.guide`: build directories,
+  model-driven updates and usage guides;
 * :mod:`hexis.evaluators`: graders;
-* :mod:`hexis.cli`: the ``hexis`` command.
+* :mod:`hexis.cli`: the ``hexis-agent`` command;
+* :mod:`hexis.legacy`: modules of an earlier compiler iteration, not used by the command-line interface.
 
 The hermetic example skill :mod:`hexis.examples.table_clean` runs without network access.
 """

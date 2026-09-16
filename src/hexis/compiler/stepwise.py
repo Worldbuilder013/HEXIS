@@ -1,15 +1,19 @@
-"""逐步增量编译的机械部分（docs/COMPILE_STEPWISE.md 第 3–6 节）。
+"""Mechanical part of stepwise incremental compilation.
 
-判定者（agent）不在这里。本模块只做三件确定性的事：
+The judge (an agent) is not here. This module does only three deterministic things:
 
-1. 把轨迹切成步，算每一步的候选集——tier 1 是从当前位置一跳可达的同类同工具状态，
-   tier 2 是其余同类同工具状态（需新增转移，且不得绕过规则提到的文档必经状态）；
-2. 把 agent 的逐步判定（match / new / ignore）翻成对齐路径，交给 :func:`modify.build_candidate`
-   构造候选，再过 Check、新轨迹回放、已接受轨迹重放——接受规则与 :mod:`update` 相同；
-3. 持久化进度（machine.json + progress.json），让一批轨迹可以分批判定、随时续跑。
+1. cut a trace into steps and compute the candidate set of every step: tier 1 is the states of the same kind and
+   tool reachable in one hop from the current position, tier 2 is the remaining states of the same kind and tool
+   (they need a new transition and must not bypass document states that the rules require);
+2. turn the agent's per-step decisions (match / new / ignore) into an alignment path, hand it to
+   :func:`modify.build_candidate` to build the candidate, then run Check, replay of the new trace and replay of the
+   accepted traces; the acceptance rule is the same as in :mod:`update`;
+3. persist progress (machine.json + progress.json) so that a batch of traces can be decided in parts and resumed at
+   any time.
 
-"提案"是一条确定性的默认规则（tier 1 有候选就取标签最接近的那个，没有就 new），只是为了让
-判定者少写字：判定者仍然逐步过目，接受提案也记为它的判定（source=proposal）。
+The "proposal" is a deterministic default rule (if tier 1 has candidates take the one with the closest labels,
+otherwise new) that only saves the judge some writing: the judge still reviews every step, and an accepted proposal
+is recorded as its decision too (source=proposal).
 """
 from __future__ import annotations
 
@@ -20,17 +24,17 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
-from hexis.machine.schema import Machine, Trace
 from hexis.compiler import check as _check
 from hexis.compiler.align import NEW, Alignment, Slot, loop_cost
 from hexis.compiler.common import anchors, entry_anchors, required_states, skip_blocked, status_known, zero_paths
 from hexis.compiler.context import CompileContext, apply_labels, check_requirements, terminal_for
 from hexis.compiler.modify import build_candidate
 from hexis.compiler.traces import Event, Prepared, end_state_for, prepare, violates_prohibitions
+from hexis.machine.schema import Machine, Trace
 
 
 # --------------------------------------------------------------------------- #
-# 机器指纹与轨迹准备
+# Machine fingerprint and trace preparation
 # --------------------------------------------------------------------------- #
 def fingerprint(m: Machine) -> str:
     parts: list = []
@@ -45,7 +49,7 @@ def fingerprint(m: Machine) -> str:
 
 
 def strip_tools(trace: Trace, names: Sequence[str]) -> Trace:
-    """剔除 harness 标记工具的记录（如 skill2fsm_begin）。"""
+    """Remove the records of harness marker tools (such as skill2fsm_begin)."""
     bad = set(names)
     trace.records = [r for r in trace.records
                      if not ((r.action or {}).get("kind") == "tool" and str((r.action or {}).get("name")) in bad)]
@@ -54,10 +58,12 @@ def strip_tools(trace: Trace, names: Sequence[str]) -> Trace:
 
 def prepare_steps(trace: Trace, ctx: CompileContext, *, source: str = "", ignore: Sequence[int] = (),
                   ignore_calls: Sequence[int] = ()) -> Prepared:
-    """prepare() 之后按 agent 的判定删掉不属于技能工作流的步（``ignore``，按事件下标）或某一步里的个别调用
-    （``ignore_calls``，按记录步号：一步里混进的环境检查、临时目录重算），再重算标签、要求、结束类别。
+    """After prepare(), drop the steps the agent decided are not part of the skill workflow (``ignore``, by event
+    index) or individual calls inside a step (``ignore_calls``, by record step number: environment checks or temporary
+    directory recomputation mixed into a step), then recompute labels, requirements and the end class.
 
-    每个事件带 ``orig``：删步之前的下标。判定一律按 ``orig`` 记，删步不会让编号漂移。"""
+    Every event carries ``orig``: its index before steps were dropped. Decisions are always keyed by ``orig``, so
+    dropping steps does not shift the numbering."""
     prep = prepare(trace, ctx, source=source)
     for ev in prep.events:
         ev.orig = ev.index                                   # type: ignore[attr-defined]
@@ -83,13 +89,14 @@ def prepare_steps(trace: Trace, ctx: CompileContext, *, source: str = "", ignore
         prep.tau, prep.evidence = terminal_for(prep.events, ctx, task_in)
         prep.claims = prep.events[-1].terminal if prep.events else ""
         conditioned = set(ctx.conditioned_terminals())
-        prep.violation = (f"声明到达 {prep.claims}，但证据只支持 {prep.tau}"
+        prep.violation = (f"claimed to reach {prep.claims}, but the evidence only supports {prep.tau}"
                           if prep.claims in conditioned and prep.claims != prep.tau else None)
     return prep
 
 
 def _remerge(events: list) -> list:
-    """删步之后，重新把连续的同工具、同基础标签调用并成一步（中间只隔叙述也算连续），与 segment_trace 同一规则。"""
+    """After dropping steps, merge consecutive calls with the same tool and base label into one step again (calls
+    separated only by narration count as consecutive), by the same rule as segment_trace."""
     out: list = []
     for ev in events:
         prev = None
@@ -109,26 +116,28 @@ def _remerge(events: list) -> list:
 
 
 def pre_status(prep: Prepared, trace: Trace, machine: Machine) -> Optional[tuple[str, str]]:
-    """不需要判定就能定下的状态：unsupported / excluded / violation / skipped。None = 要判定。"""
+    """Statuses that can be settled without a decision: unsupported / excluded / violation / skipped. None = needs a
+    decision."""
     banned = violates_prohibitions(trace, machine)
     if prep.unsupported:
-        return "unsupported", "无法识别的事件：" + ", ".join(f"第 {s} 步 kind={k}" for s, k in prep.unsupported)
+        return "unsupported", "unrecognized events: " + ", ".join(f"step {s} kind={k}" for s, k in prep.unsupported)
     if banned:
         return "excluded", banned
     if prep.requirement_violations:
-        return "excluded", "；".join(prep.requirement_violations)
+        return "excluded", "; ".join(prep.requirement_violations)
     if prep.violation:
         return "violation", prep.violation
     if not prep.observable:
-        return "skipped", "没有可观察事件"
+        return "skipped", "no observable events"
     return None
 
 
 # --------------------------------------------------------------------------- #
-# 候选集与提案
+# Candidate sets and proposals
 # --------------------------------------------------------------------------- #
 def same_kind(m: Machine, ev: Event, sid: str) -> bool:
-    """确定性预筛：类型相同；工具步还要同名工具、同基础标签（probe 状态不会写文件，生成不了 apply 步）。"""
+    """Deterministic pre-filter: same kind; tool steps also need the same tool name and the same base label (a probe
+    state does not write files, so it cannot produce an apply step)."""
     a = m.states[sid].action
     if ev.kind == "tool":
         return a.kind == "tool" and a.name == ev.tool and (a.phase or "") == (ev.label or "")
@@ -143,7 +152,7 @@ def same_kind(m: Machine, ev: Event, sid: str) -> bool:
 
 def candidates(m: Machine, ctx: CompileContext, ev: Event, pos: Optional[str], b: Optional[bool],
                term: str, *, allow_tier2: bool = True) -> tuple[list[str], list[str]]:
-    """C(p, b)：(tier 1, tier 2)。end 步只有 τ* 对应的结束状态。"""
+    """C(p, b): (tier 1, tier 2). An end step only has the end state corresponding to τ*."""
     if ev.kind == "end":
         return ([term] if term in m.states else []), []
     if pos is None:
@@ -166,7 +175,8 @@ def candidates(m: Machine, ctx: CompileContext, ev: Event, pos: Optional[str], b
 
 
 def propose(m: Machine, ev: Event, t1: list[str], t2: list[str], term: str = "") -> dict:
-    """默认提案：tier 1 有候选取派生标签相同的首个，否则首个；交付步优先取能通向 τ* 终点的；没有 tier 1 → new。"""
+    """Default proposal: if tier 1 has candidates take the first one with the same derived labels, otherwise the first;
+    for a deliverable step prefer candidates that lead to the τ* terminal; no tier 1 → new."""
     if ev.kind == "end":
         return {"d": "match", "state": t1[0]} if t1 else {"d": "new"}
     if t1:
@@ -180,7 +190,7 @@ def propose(m: Machine, ev: Event, t1: list[str], t2: list[str], term: str = "")
 
 
 # --------------------------------------------------------------------------- #
-# 判定 → 对齐 → 候选 → 检查 → 接受
+# Decisions → alignment → candidate → check → acceptance
 # --------------------------------------------------------------------------- #
 @dataclass
 class Decision:
@@ -192,8 +202,9 @@ class Decision:
 
 
 def parse_decisions(spec: Any) -> tuple[list[int], dict[int, Decision], bool, list[int]]:
-    """一条轨迹的判定：{"accept_proposals": bool, "ignore_calls": [记录步号…],
-    "steps": {"<orig>": {"d", "state"?, "purpose"?, "clause"?}}}。"steps" 里 d=ignore 的步在对齐前删掉。"""
+    """Decisions for one trace: {"accept_proposals": bool, "ignore_calls": [record step number…],
+    "steps": {"<orig>": {"d", "state"?, "purpose"?, "clause"?}}}. Steps in "steps" with d=ignore are dropped before
+    alignment."""
     spec = spec or {}
     accept = bool(spec.get("accept_proposals", False))
     ignore_calls = [int(x) for x in (spec.get("ignore_calls") or [])]
@@ -213,7 +224,8 @@ def parse_decisions(spec: Any) -> tuple[list[int], dict[int, Decision], bool, li
 
 def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps: dict[int, Decision],
                          accept_proposals: bool, *, allow_tier2: bool) -> tuple[Optional[Alignment], str, list]:
-    """把逐步判定翻成对齐路径。严格轮（allow_tier2=False）把 tier 2 匹配改为 new。"""
+    """Turn per-step decisions into an alignment path. The strict attempt (allow_tier2=False) turns tier 2 matches
+    into new."""
     term = end_state_for(m, prep.tau)
     ea = entry_anchors(m)
     slots: list[Slot] = []
@@ -226,7 +238,7 @@ def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps:
         rec: dict = {"i": orig, "event": ev.describe(), "tier1": t1, "tier2": t2}
         if ev.kind == "end":
             if not t1:
-                return None, f"机器里没有结束状态 {term}", log
+                return None, f"the machine has no end state {term}", log
             slots.append(Slot(index=ev.index, state=term, how="end", edge="keep" if pos is not None else "start"))
             rec.update({"decision": "end", "state": term})
             log.append(rec)
@@ -234,11 +246,11 @@ def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps:
         d = steps.get(orig)
         if d is None:
             if not accept_proposals:
-                return None, f"第 {orig} 步没有判定", log
+                return None, f"step {orig} has no decision", log
             p = propose(m, ev, t1, t2, term)
             d = Decision(d=p["d"], state=p.get("state", ""), source="proposal")
         if d.d not in ("match", "new"):
-            return None, f"第 {orig} 步的判定 {d.d!r} 不认识", log
+            return None, f"step {orig} has an unrecognized decision {d.d!r}", log
         tier = 0
         if d.d == "match":
             if d.state in t1:
@@ -246,9 +258,9 @@ def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps:
             elif d.state in t2 and allow_tier2:
                 tier = 2
             elif d.state in t2:
-                d = Decision(d="new", purpose=d.purpose, clause=d.clause, source=d.source + "→new(严格轮)")
+                d = Decision(d="new", purpose=d.purpose, clause=d.clause, source=d.source + "→new(strict attempt)")
             else:
-                return None, f"第 {orig} 步判为 {d.state!r}，它不在候选里（T1 {t1} / T2 {t2}）", log
+                return None, f"step {orig} was matched to {d.state!r}, which is not a candidate (T1 {t1} / T2 {t2})", log
         if d.d == "match":
             st = m.states[d.state]
             how = "label" if set(getattr(st.action, "labels", []) or []) != set(ev.labels) else "match"
@@ -268,7 +280,7 @@ def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps:
                     + ("+loop" if slots[-1].loop else "")})
         log.append(rec)
     if not slots or slots[-1].how != "end":
-        return None, "路径没有以结束状态收尾", log
+        return None, "the path does not finish with an end state", log
     cost = sum(3 if s.edge in ("add", "start") else 0 for s in slots) + sum(4 for s in slots if s.is_new) \
         + sum(1 for s in slots if s.how == "label") + sum(s.c_loop for s in slots)
     return Alignment(slots=slots, cost=cost, end_state=term), "", log
@@ -276,7 +288,8 @@ def align_from_decisions(m: Machine, ctx: CompileContext, prep: Prepared, steps:
 
 def _stamp_clauses(build_machine: Machine, alignment: Alignment, anchors_out: list[str], log: list,
                    ctx: CompileContext) -> None:
-    """新状态（及其生成门）写上 agent 给的条款号；log 与 slots 一一对应（每个可观察事件一条）。"""
+    """Stamp the clause id given by the agent on new states (and their gates); log and slots correspond one to one
+    (one entry per observable event)."""
     ids = {c[0] for c in ctx.clauses}
     for slot, sid, rec in zip(alignment.slots, anchors_out, log):
         rec["state_id"] = sid
@@ -302,19 +315,24 @@ class Accepted:
 
 
 def update_with_decisions(machine: Machine, trace: Trace, ctx: CompileContext, *, source: str, spec: Any,
-                          accepted: list[Accepted], attempts: int = 2) -> tuple[Machine, dict, Optional[Accepted]]:
-    """处理一条轨迹。返回 (新机器或原机器, 记录, 接受项或 None)。
+                          accepted: list[Accepted], attempts: int = 2,
+                          key: str = "") -> tuple[Machine, dict, Optional[Accepted]]:
+    """Process one trace. Returns (new or unchanged machine, record, accepted item or None).
 
-    判定者可以在轨迹层面给 ``{"exclude": "<原因>"}``：这条轨迹的步无法按技能工作流归类
-    （例如真正的修改藏在 write 工具写出的脚本文件里、由一条没有写信号的命令执行），不参与更新。"""
+    ``key`` identifies the trace in the record and in the accepted item (default: the task id, or the file stem when
+    the trace has no task id). Callers that process several traces of the same task must pass distinct keys.
+
+    The judge may give ``{"exclude": "<reason>"}`` at trace level: the steps of this trace cannot be classified by the
+    skill workflow (for example the real modification is hidden in a script file written by the write tool and run
+    by a command with no write signal), so the trace does not take part in the update."""
     if isinstance(spec, dict) and spec.get("exclude"):
         prep0 = prepare_steps(trace, ctx, source=source)
-        return machine, {"trace": prep0.trace_id, "verdict": prep0.verdict, "tau": prep0.tau,
+        return machine, {"trace": key or prep0.trace_id, "verdict": prep0.verdict, "tau": prep0.tau,
                          "events": [e.describe() for e in prep0.observable], "status": "excluded",
-                         "why": "判定者排除：" + str(spec["exclude"])}, None
+                         "why": "excluded by the judge: " + str(spec["exclude"])}, None
     ignore, steps, accept_props, ignore_calls = parse_decisions(spec)
     prep = prepare_steps(trace, ctx, source=source, ignore=ignore, ignore_calls=ignore_calls)
-    entry: dict = {"trace": prep.trace_id, "verdict": prep.verdict, "tau": prep.tau, "ignored": sorted(ignore),
+    entry: dict = {"trace": key or prep.trace_id, "verdict": prep.verdict, "tau": prep.tau, "ignored": sorted(ignore),
                    "ignored_calls": sorted(ignore_calls),
                    "events": [e.describe() for e in prep.observable], "attempts": [], "fingerprint_before": fingerprint(machine)}
     pre = pre_status(prep, trace, machine)
@@ -324,7 +342,7 @@ def update_with_decisions(machine: Machine, trace: Trace, ctx: CompileContext, *
     modes = [True, False][:max(1, attempts)]
     for k, allow in enumerate(modes, 1):
         att: dict = {"attempt": k, "allow_tier2": allow}
-        prep_k = prepare_steps(trace, ctx, source=source, ignore=ignore, ignore_calls=ignore_calls)   # intent 会被 new 判定改写，每轮重来
+        prep_k = prepare_steps(trace, ctx, source=source, ignore=ignore, ignore_calls=ignore_calls)   # intent is rewritten by new decisions, so redo this every attempt
         al, why, log = align_from_decisions(machine, ctx, prep_k, steps, accept_props, allow_tier2=allow)
         att["decisions"] = log
         if al is None:
@@ -350,21 +368,22 @@ def update_with_decisions(machine: Machine, trace: Trace, ctx: CompileContext, *
         broken = None
         for acc in accepted:
             if acc.prep is None:
-                continue
+                raise ValueError(f"accepted trace {acc.trace} is not available, so the candidate cannot be checked "
+                                 "against it")
             r2 = _check.replay(bd.machine, acc.prep, acc.anchors)
             if not r2.ok:
                 broken = (acc.trace, r2.why)
                 break
         if broken is not None:
-            att["result"], att["why"] = "protected_failed", f"{broken[0]}：{broken[1]}"
+            att["result"], att["why"] = "protected_failed", f"{broken[0]}: {broken[1]}"
             entry["attempts"].append(att)
             continue
         att["result"] = "accepted"
         entry["attempts"].append(att)
         entry.update({"status": "accepted", "cost": al.cost, "anchors": list(bd.anchors), "changes": list(bd.changes),
-                      "path": rp.path, "inserted": [c for c in bd.changes if c.startswith("新增状态") or c.startswith("新增可观察")],
+                      "path": rp.path, "inserted": [c for c in bd.changes if c.startswith("added state ") or c.startswith("added observable ")],
                       "fingerprint_after": fingerprint(bd.machine)})
-        return bd.machine, entry, Accepted(trace=prep.trace_id, source=source, anchors=list(bd.anchors),
+        return bd.machine, entry, Accepted(trace=key or prep.trace_id, source=source, anchors=list(bd.anchors),
                                            ignore=sorted(ignore), prep=prep_k, ignore_calls=sorted(ignore_calls))
     entry["status"] = "rejected"
     last = entry["attempts"][-1] if entry["attempts"] else {}
@@ -373,14 +392,14 @@ def update_with_decisions(machine: Machine, trace: Trace, ctx: CompileContext, *
 
 
 # --------------------------------------------------------------------------- #
-# 进度
+# Progress
 # --------------------------------------------------------------------------- #
 @dataclass
 class Progress:
     machine: Machine
     entries: list = field(default_factory=list)
     accepted: list = field(default_factory=list)       # list[Accepted]
-    agent_log: list = field(default_factory=list)      # 每条轨迹每一步的判定
+    agent_log: list = field(default_factory=list)      # decisions for every step of every trace
 
     def done(self) -> dict:
         return {e["trace"]: e["status"] for e in self.entries}
@@ -412,8 +431,11 @@ class Progress:
         pr = cls(machine=m, entries=list(data.get("entries") or []), agent_log=list(data.get("agent_log") or []))
         for a in data.get("accepted") or []:
             tr = traces.get(a["trace"])
-            prep = (prepare_steps(tr, ctx, source=a["source"], ignore=a.get("ignore") or [],
-                                  ignore_calls=a.get("ignore_calls") or []) if tr is not None else None)
+            if tr is None:
+                raise ValueError(f"accepted trace {a['trace']} from {p} is not in the trace directory; every accepted "
+                                 "trace must stay available because the machine is checked against it")
+            prep = prepare_steps(tr, ctx, source=a["source"], ignore=a.get("ignore") or [],
+                                 ignore_calls=a.get("ignore_calls") or [])
             pr.accepted.append(Accepted(trace=a["trace"], source=a["source"], anchors=list(a["anchors"]),
                                         ignore=list(a.get("ignore") or []), prep=prep,
                                         ignore_calls=list(a.get("ignore_calls") or [])))

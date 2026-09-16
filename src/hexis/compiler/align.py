@@ -1,30 +1,30 @@
-"""轨迹与状态机对齐（算法文档第 4 节）：固定代价表上的动态规划。
+"""Alignment of a trace with the machine: dynamic programming over a fixed cost table.
 
-对齐对象是**可观察事件**与**可观察状态**（Q_obs：工具、结束、用户、可观察的模型状态）。
-叙述与判断记录不占格，随附到下一个事件。相邻事件之间用 p ⇝_b q（只经零宽状态相连，首条
-转移与前一事件的成败相容）判「保留已有路径」。每个事件还带一个新增状态候选。
+What gets aligned are **observable events** and **observable states** (Q_obs: tool, end, user and observable model
+states). Narration and judge records take no slot and are attached to the next event. Between adjacent events,
+p ⇝_b q (connected through zero-width states only, with the first transition consistent with the outcome of the
+previous event) decides "keep the existing path". Every event also has a new-state candidate.
 
-代价表::
+Cost table::
 
-    同类型、同工具、同标签匹配          0
-    保留已有路径                        0
-    更换同标签的工具                    1
-    标签集不同（多出或缺少派生标签）      1
-    增加循环                            1
-    新增转移或修改入口                  3
-    新增状态                            4
-    新增转移绕过规则提到的文档状态       ∞
+    match with the same kind, tool and label                        0
+    keep the existing path                                          0
+    change the tool, same label                                     1
+    different label set (extra or missing derived labels)           1
+    add a loop                                                      1
+    add a transition or change the entry                            3
+    add a state                                                     4
+    add a transition that bypasses a document state the rules name  ∞
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-from hexis.machine.schema import Machine
-from hexis.compiler.common import (INF, anchors, entry_anchors, required_states, skip_blocked, status_known,
-                     zero_paths)
+from hexis.compiler.common import INF, anchors, entry_anchors, required_states, skip_blocked, status_known, zero_paths
 from hexis.compiler.context import CompileContext
 from hexis.compiler.traces import Event, Prepared, end_state_for
+from hexis.machine.schema import Machine
 
 C_MATCH, C_KEEP = 0, 0
 C_REALIZE, C_LABEL, C_LOOP = 1, 1, 1
@@ -36,9 +36,9 @@ NEW = "new:"
 
 @dataclass
 class Slot:
-    """对齐路径上的一格：第 i 个可观察事件落到哪个状态、怎么落的。"""
-    index: int                      # 事件在 prep.events 里的下标
-    state: str                      # 状态 id，或 new:<i>
+    """One slot of the alignment path: which state the i-th observable event lands on, and how."""
+    index: int                      # index of the event in prep.events
+    state: str                      # state id, or new:<i>
     how: str                        # match / realize / label / new / end
     c_match: int = 0
     c_loop: int = 0
@@ -66,7 +66,7 @@ class Alignment:
 
 
 def match_cost(m: Machine, ev: Event, q: str, term: str, *, allow_realize: bool) -> tuple[int, str]:
-    """c_m(s_i, q)。"""
+    """c_m(s_i, q): the match cost of event s_i on state q."""
     st = m.states[q]
     a = st.action
     if ev.kind == "end":
@@ -90,7 +90,7 @@ def match_cost(m: Machine, ev: Event, q: str, term: str, *, allow_realize: bool)
 
 
 def loop_cost(ev: Event, has_loop: bool) -> int:
-    """c_l：事件多次调用、末次成功、原图缺少循环时计一分。"""
+    """c_l: one point when the event has several calls, the last one succeeds and the original graph lacks a loop."""
     if ev.kind == "tool" and ev.n_calls > 1 and ev.ok and not has_loop:
         return C_LOOP
     return 0
@@ -98,10 +98,10 @@ def loop_cost(ev: Event, has_loop: bool) -> int:
 
 def align(m: Machine, prep: Prepared, ctx: CompileContext, *,
           allow_realize: bool = True) -> tuple[Optional[Alignment], str]:
-    """整条轨迹的最小代价对齐路径。返回 (对齐, 拒绝原因)。"""
+    """Minimum cost alignment path for the whole trace. Returns (alignment, rejection reason)."""
     evs = [e for e in prep.events if e.observable]
     if not evs:
-        return None, "轨迹没有可观察事件"
+        return None, "trace has no observable events"
     term = end_state_for(m, prep.tau)
     anc = anchors(m)
     req = required_states(m, ctx)
@@ -117,7 +117,7 @@ def align(m: Machine, prep: Prepared, ctx: CompileContext, *,
 
     def edge_cost(p: str, q: str, b: Optional[bool]) -> tuple[int, str]:
         if p.startswith(NEW) or q.startswith(NEW):
-            return C_KEEP, "add"              # 新增状态的连接不再重复计费
+            return C_KEEP, "add"              # connections of new states are not charged again
         if q in paths(p, b):
             return C_KEEP, "keep"
         if skip_blocked(m, p, q, req):
@@ -169,7 +169,7 @@ def align(m: Machine, prep: Prepared, ctx: CompileContext, *,
             if best is not None:
                 dp[i][q] = best
     if not dp[n - 1]:
-        return None, "没有可选的对齐路径"
+        return None, "no alignment path available"
     last = min(dp[n - 1].items(), key=lambda kv: (kv[1][0], kv[0]))
     slots: list[Slot] = []
     q = last[0]

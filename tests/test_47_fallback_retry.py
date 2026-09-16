@@ -1,4 +1,4 @@
-"""回退态是重试枢纽，不是终结：回到最近工具步的入口重来，清零触发回退的计数；用完才解释执行或停机。"""
+"""The fallback state is a retry hub, not the end: go back to the entry of the latest tool step, reset the counter that triggered the fallback; only when retries are used up, interpret or stop."""
 from __future__ import annotations
 
 from hexis.execution import runtime
@@ -33,7 +33,7 @@ class Model:
         return {"cmd": f"try{self.calls}"}
 
     def classify(self, **kw):
-        return "弃权"
+        return "abstain"
 
 
 class Tools:
@@ -48,7 +48,7 @@ class Tools:
 
 
 def test_retry_hub_resets_counter_and_reenters_at_gate():
-    # 工具前 4 次都失败：机器自己的 n >= 2 出口进回退态两次，每次回到生成门重来，第 5 次成功
+    # the tool fails the first 4 times: the machine's own n >= 2 exit enters the fallback state twice, each time going back to the generation gate; the 5th attempt succeeds
     m = machine()
     rr = runtime.run_task(m, {"input": {"x": 1}}, model=Model(0), tools=Tools(5), doc="", max_steps=60,
                           on_error="fallback", retries=3, interpret=False)
@@ -68,7 +68,7 @@ def test_retries_exhausted_stops_without_interpret():
 
 
 def test_default_keeps_old_fallback_semantics():
-    # retries=0：回退态直接进解释段（旧行为不变）
+    # retries=0: the fallback state goes straight to the interpreted segment (old behavior unchanged)
     class Interp(Model):
         def generate(self, *, prompt, values, history=()):
             self.calls += 1

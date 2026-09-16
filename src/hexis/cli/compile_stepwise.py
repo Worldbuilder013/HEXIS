@@ -26,16 +26,15 @@ import json
 import pathlib
 
 from hexis.cli import stepwise_view as SV
-from hexis.tools.backends import REGISTRIES, registry
 from hexis.cli.compile import describe
-from hexis.skill_loader import markdown_clauses
 from hexis.compiler import check as _check
 from hexis.compiler import stepwise as SW
 from hexis.compiler.context import build_context, load_rules
 from hexis.compiler.init import normalize
 from hexis.compiler.traces import load_traces
 from hexis.machine.schema import load_machine
-from hexis.skill_loader import load_agent_skill
+from hexis.skill_loader import load_agent_skill, markdown_clauses
+from hexis.tools.backends import REGISTRIES, registry
 from hexis.tools.toolspec import load_registry
 
 RULES_FILE = "compile.json"
@@ -71,7 +70,10 @@ def setup(a):
     errs = _check.check(m0, ctx)
     if errs:
         raise SystemExit(f"initial machine fails the checks: {errs[:5]}")
-    prog = SW.Progress.load(out, m0, ctx, {k: v[1] for k, v in traces.items()})
+    try:
+        prog = SW.Progress.load(out, m0, ctx, {k: v[1] for k, v in traces.items()})
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     return out, ctx, m0, traces, order, prog
 
 
@@ -87,9 +89,9 @@ def pending(order, prog, traces, ctx):
         prep = SW.prepare_steps(t, ctx, source=str(p))
         pre = SW.pre_status(prep, t, prog.machine)
         if pre is not None:
-            prog.entries.append({"trace": prep.trace_id, "verdict": prep.verdict, "tau": prep.tau,
+            prog.entries.append({"trace": name, "verdict": prep.verdict, "tau": prep.tau,
                                  "events": [e.describe() for e in prep.observable], "status": pre[0], "why": pre[1]})
-            print(f"{prep.trace_id:<12} {pre[0]:<11} {pre[1][:100]}")
+            print(f"{name:<12} {pre[0]:<11} {pre[1][:100]}")
             continue
         todo.append((name, p, t, prep))
     return todo
@@ -102,6 +104,7 @@ def cmd_show(a, out, ctx, traces, order, prog):
     shown = []
     for name, p, t, prep in batch:
         s = SV.show_trace(prog.machine, ctx, prep)
+        s["trace"] = name
         shown.append(s)
         print(SV.render_show(prog.machine, s))
         print()
@@ -129,7 +132,7 @@ def cmd_apply(a, out, ctx, traces, order, prog):
     for name in names:
         p, t = traces[name]
         m2, entry, acc = SW.update_with_decisions(prog.machine, t, ctx, source=str(p), spec=spec[name],
-                                                  accepted=prog.accepted, attempts=a.attempts)
+                                                  accepted=prog.accepted, attempts=a.attempts, key=name)
         prog.entries.append(entry)
         for att in entry.get("attempts", []):
             for d in att.get("decisions", []):

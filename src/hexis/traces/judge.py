@@ -1,18 +1,22 @@
-"""评判：给一条轨迹定 accepted / rejected。
+"""Judging: decide accepted / rejected for a trace.
 
-评判有两条独立的轴，任一不过即拒：
+Judging has two independent axes; failing either one rejects:
 
-* **客观验收**（``acceptance``）—— 结果对不对。技能自带的确定性闸，只看轨迹。
-* **禁止性要求**（``prohibitions``）—— 有没有做不该做的事。**即使结果对，触犯即拒**，
-  并标出违规发生的那一步作为 ``error_step``（拒绝集排除检查的锚）。
+* **Objective acceptance** (``acceptance``) -- is the result right. A deterministic gate that
+  ships with the skill and looks only at the trace.
+* **Prohibitions** (``prohibitions``) -- did the run do something it must not do. **Violating one
+  rejects the trace even if the result is right**, and the step where the violation happened is
+  marked as ``error_step`` (the anchor for the rejection-set exclusion check).
 
-评判是确定性的、不调模型：它是「确定性守门程序」的一半，编译器拿它把轨迹分成接受集与
-拒绝集。
+Judging is deterministic and never calls a model: it is one half of the "deterministic
+gatekeeper", which the compiler uses to split traces into an accepted set and a rejected set.
 
-禁止项有两类形状。``absent``/``present``/``regex`` 看的是**文本**（某个串出没出现过），
-``forbid_action``/``require_before`` 看的是**事件流**（谁在谁之前、哪两个参数相等）。数学
-技能的 P1「任何非平凡结果都要至少跑一次独立核验」属于后者：它不是「别说某句话」，而是
-「提交之前必须先跑过核验」，只有把轨迹当事件序列扫一遍才判得出来。
+Prohibitions come in two shapes. ``absent``/``present``/``regex`` look at **text** (whether some
+string ever appeared), while ``forbid_action``/``require_before`` look at the **event stream**
+(what came before what, which two arguments are equal). A math skill's P1, "every non-trivial
+result must be independently checked at least once", belongs to the latter: it is not "don't say
+a certain sentence" but "a check must have run before submitting", which can only be decided by
+scanning the trace as a sequence of events.
 """
 
 from __future__ import annotations
@@ -21,8 +25,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Callable, Mapping, Optional, Sequence
 
-from hexis.traces.normalize import canon_action, canon_tool_name
 from hexis.machine.schema import Prohibition, Trace
+from hexis.traces.normalize import canon_action, canon_tool_name
 
 
 @dataclass
@@ -34,22 +38,23 @@ class Verdict:
 
 def evaluate(trace: Trace, acceptance: Optional[Callable[[Trace], bool]],
              prohibitions: list[Prohibition]) -> Verdict:
-    """定 verdict。禁止项优先（触犯即拒，哪怕验收通过），其次看客观验收。"""
+    """Decide the verdict. Prohibitions come first (a violation rejects even if acceptance passes), then objective acceptance."""
     for p in prohibitions or []:
         step = _violation_step(p, trace)
         if step is not None:
             return Verdict("rejected", error_step=step,
-                           reason=f"触犯禁止性要求 {p.id}")
+                           reason=f"violates prohibition {p.id}")
     ok = acceptance(trace) if acceptance else True
     if ok:
         return Verdict("accepted")
-    return Verdict("rejected", error_step=_last_step(trace), reason="未通过客观验收")
+    return Verdict("rejected", error_step=_last_step(trace), reason="failed objective acceptance")
 
 
 def judged(trace: Trace, acceptance, prohibitions) -> Trace:
-    """返回补好 verdict/error_step 的**新** trace（原 trace 不动），方便组接受/拒绝集。
+    """Return a **new** trace with verdict/error_step filled in (the original trace is untouched), for building the accepted/rejected sets.
 
-    运行级出身（arm/run/model/harness）原样带过去：评判不该把「这条轨迹是谁跑的」擦掉。
+    Run-level provenance (arm/run/model/harness) is carried over as is: judging should not erase
+    "who ran this trace".
     """
     v = evaluate(trace, acceptance, prohibitions)
     return Trace(task=trace.task, arm=trace.arm, run=trace.run, model=trace.model,
@@ -58,10 +63,10 @@ def judged(trace: Trace, acceptance, prohibitions) -> Trace:
 
 
 # --------------------------------------------------------------------------- #
-# 禁止项检查
+# Prohibition checks
 # --------------------------------------------------------------------------- #
 def _violation_step(p: Prohibition, trace: Trace) -> Optional[int]:
-    """返回违规发生的 step，没违规返回 None。"""
+    """Return the step where the violation happened, or None if there is no violation."""
     if p.check == "forbid_action":
         return _forbid_action(p.pattern, trace)
     if p.check == "require_before":
@@ -85,10 +90,11 @@ def _violation_step(p: Prohibition, trace: Trace) -> Optional[int]:
 
 
 def _forbid_action(pattern: Any, trace: Trace) -> Optional[int]:
-    """结构化禁止项：某动作 + 变量关系成立即违规。
+    """Structured prohibition: a violation when an action + a variable relation both hold.
 
-    ``pattern`` = ``{"name": 工具名, "equal": ["input.a", "input.b"]}``：该工具动作里
-    两个路径的取值相等即违规（例如导出目标 == 源文件 → 覆盖原文件）。
+    ``pattern`` = ``{"name": tool name, "equal": ["input.a", "input.b"]}``: a violation when the
+    values at the two paths in that tool action are equal (e.g. export target == source file ->
+    overwrites the original file).
     """
     if not isinstance(pattern, dict):
         return None
@@ -105,7 +111,7 @@ def _forbid_action(pattern: Any, trace: Trace) -> Optional[int]:
 
 
 def _resolve(action: dict, path: str) -> Any:
-    """按 ``input.output_path`` 这样的点路径从动作 dict 取值。"""
+    """Take a value from an action dict by a dotted path such as ``input.output_path``."""
     cur: Any = action
     for part in path.split("."):
         if isinstance(cur, dict):
@@ -116,36 +122,39 @@ def _resolve(action: dict, path: str) -> Any:
 
 
 # --------------------------------------------------------------------------- #
-# require_before：事件流上的先后要求（数学技能的 P1）
+# require_before: ordering requirements on the event stream (a math skill's P1)
 # --------------------------------------------------------------------------- #
-#: 终点 id 里**不携带类别**的那几个通用名。``done`` 只说「结束了」，没说以什么方式结束，
-#: 拿它当类别会把 only_when 变成一个碰巧永远不匹配的过滤器。
+#: Generic terminal ids that **carry no category**. ``done`` only says "it ended", not which way
+#: it ended; using it as a category would turn only_when into a filter that happens to never match.
 _GENERIC_TERMINALS = frozenset({"done", "end", "stop", "ok"})
 
 
 def _require_before(pattern: Any, trace: Trace) -> Optional[int]:
-    """「``action`` 出现之前必须先出现过 ``requires`` 里的任一个」，否则违规。
+    """One of ``requires`` must have appeared before ``action`` appears; otherwise it is a violation.
 
     ``pattern``::
 
-        {"action": "submit_answer",                  # 被守卫的动作
-         "requires": ["math_verify", "run_python"],  # 任一个即可（按规范化工具名比）
-         "only_when": {"terminal_kind": "verified"}, # 可选；省略 = 所有轨迹都管
-         "clause": "RV.0.1", "quote": "<技能文档原句>"}
+        {"action": "submit_answer",                  # the guarded action
+         "requires": ["math_verify", "run_python"],  # any one suffices (compared by canonical tool name)
+         "only_when": {"terminal_kind": "verified"}, # optional; omitted = applies to every trace
+         "clause": "RV.0.1", "quote": "<original sentence from the skill doc>"}
 
-    扫描 ``trace.records``，**按顺序**、只看第一次：先撞上 ``requires`` 里的动作 ⇒ 这次运行
-    确实先核验过，不违规；先撞上被守卫的动作 ⇒ 违规，``error_step`` 就是这条记录的 ``step``。
-    两个都没出现（例如预算耗尽、根本没提交）⇒ 不违规——P1 管的是「提交时有没有核验过」，不是
-    「必须提交」。
+    Scans ``trace.records`` **in order**, looking only at the first hit: hitting an action from
+    ``requires`` first => this run really did check first, no violation; hitting the guarded
+    action first => a violation, and ``error_step`` is that record's ``step``. Neither appears
+    (e.g. budget exhausted, never submitted) => no violation -- P1 is about "was it checked when
+    submitting", not "must submit".
 
-    动作比较一律走 :func:`~hexis.traces.normalize.canon_action`，工具名因此过
-    :func:`~hexis.traces.normalize.canon_tool_name`：``scripts/math_verify.py``、``math-verify``、
-    ``MATH_VERIFY`` 折成同一个名字。**这里不写第二套名字匹配规则**——写了就会和编译/回放两侧
-    的折叠口径分家。``action``/``requires`` 的元素既可以是裸工具名（字符串），也可以是完整的
-    动作 dict（必须带 ``kind``，例如 ``{"kind": "end", "terminal": "END_VERIFIED"}``）。
+    All action comparisons go through :func:`~hexis.traces.normalize.canon_action`, so tool names
+    pass through :func:`~hexis.traces.normalize.canon_tool_name`: ``scripts/math_verify.py``,
+    ``math-verify`` and ``MATH_VERIFY`` fold into the same name. **No second set of name-matching
+    rules is written here** -- one would drift away from the folding used by compilation and
+    replay. Elements of ``action``/``requires`` may be a bare tool name (a string) or a complete
+    action dict (which must have ``kind``, e.g. ``{"kind": "end", "terminal": "END_VERIFIED"}``).
 
-    ``only_when.terminal_kind`` 按 :func:`terminal_kind` 判：一次**标注了未验证**地结束的运行
-    什么都没声称，P1 不该在它头上开火。类别取值可以是一个字符串或一组字符串。
+    ``only_when.terminal_kind`` is decided by :func:`terminal_kind`: a run that ended **explicitly
+    marked as unverified** claims nothing, and P1 should not fire on it. The category value may be
+    a string or a collection of strings.
     """
     if not isinstance(pattern, Mapping):
         return None
@@ -161,21 +170,21 @@ def _require_before(pattern: Any, trace: Trace) -> Optional[int]:
     for r in trace.records:
         key = canon_action(r)
         if key in required:
-            return None                 # 核验先跑过了
+            return None                 # the check ran first
         if key == want:
-            return r.step               # 守卫动作先到：之前一次核验都没有
+            return r.step               # guarded action came first: no check at all before it
     return None
 
 
 def _action_key(spec: Any) -> tuple[str, ...]:
-    """把 pattern 里的一项折成动作 KEY。裸字符串按工具名理解（P1 的两侧都是工具）。"""
+    """Fold one entry of the pattern into an action KEY. A bare string is taken as a tool name (both sides of P1 are tools)."""
     if isinstance(spec, Mapping):
         return canon_action(spec)
     return canon_action({"kind": "tool", "name": str(spec)})
 
 
 def _as_list(v: Any) -> list:
-    """None → []；单个字符串 → 单元素；其余序列原样摊平一层。"""
+    """None -> []; a single string -> one element; other sequences are flattened one level as is."""
     if v is None:
         return []
     if isinstance(v, str) or isinstance(v, Mapping):
@@ -186,19 +195,22 @@ def _as_list(v: Any) -> list:
 
 
 def _fold_kind(value: Any) -> str:
-    """类别名的规范形。复用工具名那套折叠（小写、``-``/空白 → ``_``），再削掉 ``end_`` 前缀，
-    好让终点 id ``END_UNVERIFIED`` 与类别 ``unverified`` 是同一个东西。"""
+    """Canonical form of a category name. Reuses the tool-name folding (lower-case, ``-``/whitespace -> ``_``), then strips the ``end_`` prefix,
+    so that the terminal id ``END_UNVERIFIED`` and the category ``unverified`` are the same thing."""
     s = canon_tool_name(str(value or ""))
     return s[4:] if s.startswith("end_") else s
 
 
 def _kind_matches(actual: str, want: Any) -> bool:
-    """轨迹实际的终点类别是不是 ``want`` 之一。
+    """Whether the trace's actual terminal category is one of ``want``.
 
-    **判不出类别时（``actual`` 为空）算匹配**，即 only_when 过滤器对不表态的轨迹不生效、
-    禁止项照查。这是有意的保守方向：P1 要抓的是「没核验就提交」，豁免必须由运行**显式**
-    标注（机器的 ``END_UNVERIFIED`` 终点、或提交动作自报的 ``verified: false``）才给；
-    反过来把判不出的轨迹一律放行，会让一条头部残缺的轨迹悄悄绕过检查，违规率被系统性低估。
+    **When the category cannot be determined (``actual`` is empty) it counts as a match**, i.e. the
+    only_when filter does not apply to traces that take no position, and the prohibition is still
+    checked. This is the deliberately conservative direction: P1 is meant to catch "submitted
+    without checking", and an exemption is granted only when the run is **explicitly** marked (the
+    machine's ``END_UNVERIFIED`` terminal, or ``verified: false`` self-reported by the submit
+    action); letting every undeterminable trace through instead would let a trace with a truncated
+    head quietly bypass the check, and the violation rate would be systematically underestimated.
     """
     wants = {_fold_kind(w) for w in _as_list(want)}
     wants.discard("")
@@ -208,20 +220,26 @@ def _kind_matches(actual: str, want: Any) -> bool:
 
 
 def terminal_kind(trace: Trace) -> str:
-    """从轨迹判断这次运行**以哪种方式**结束，判不出返回空串。
+    """Determine from the trace **which way** this run ended; empty string if it cannot be determined.
 
-    评判只拿得到轨迹、拿不到机器，所以 :class:`~hexis.machine.schema.Terminal` 上声明的 ``kind``
-    必须由执行侧落进轨迹。按下面的优先级读（前面的赢）：
+    Judging only has the trace, not the machine, so the ``kind`` declared on
+    :class:`~hexis.machine.schema.Terminal` must be written into the trace by the execution side.
+    Read in this priority order (earlier wins):
 
-    1. 结束那条记录的 ``action``/``action.input``/``output``/``vars`` 里显式写着的
-       ``terminal_kind``——最直接，执行器想说清楚就写这个键；
-    2. 结束记录的终点 id（``{"kind": "end", "terminal": ...}``）折成类别：``END_UNVERIFIED``
-       → ``unverified``。``done``/``end``/``stop``/``ok`` 这几个通用 id 不算类别，跳过；
-    3. 提交动作自报的布尔 ``verified``（预算耗尽时被强制标成 ``False`` 的那个标记）；
-    4. 都没有 ⇒ 空串（不表态，见 :func:`_kind_matches` 对空串的处理）。
+    1. an explicit ``terminal_kind`` in the ending record's
+       ``action``/``action.input``/``output``/``vars`` -- the most direct; an executor that wants
+       to be clear writes this key;
+    2. the terminal id of the ending record (``{"kind": "end", "terminal": ...}``) folded into a
+       category: ``END_UNVERIFIED`` -> ``unverified``. The generic ids ``done``/``end``/``stop``/
+       ``ok`` are not categories and are skipped;
+    3. the boolean ``verified`` self-reported by the submit action (the marker forced to ``False``
+       when the budget is exhausted);
+    4. none of these => empty string (no position; see how :func:`_kind_matches` treats the empty
+       string).
 
-    「结束那条记录」= 最后一条 ``kind == "end"`` 的记录；没有 end 记录（解释执行的轨迹常常
-    以一次 ``submit_answer`` 收尾）就看最后一条记录。两者不是同一条时两条都看。
+    "The ending record" = the last record with ``kind == "end"``; without an end record
+    (interpretive traces often finish with a ``submit_answer``) the last record is used. When the
+    two are different records, both are examined.
     """
     recs = list(trace.records or ())
     if not recs:
@@ -230,15 +248,15 @@ def terminal_kind(trace: Trace) -> str:
     end = next((r for r in reversed(recs) if _rec_kind(r) == "end"), None)
     tails = [end, last] if (end is not None and end is not last) else [end or last]
 
-    for r in tails:                                     # ① 显式标注
+    for r in tails:                                     # (1) explicit marker
         for src in _rec_sources(r):
             if "terminal_kind" in src:
                 return _fold_kind(src["terminal_kind"])
-    if end is not None:                                 # ② 终点 id
+    if end is not None:                                 # (2) terminal id
         k = _fold_kind(_rec_action(end).get("terminal"))
         if k and k not in _GENERIC_TERMINALS:
             return k
-    for r in tails:                                     # ③ 自报的 verified 标记
+    for r in tails:                                     # (3) self-reported verified marker
         for src in _rec_sources(r):
             v = src.get("verified")
             if isinstance(v, bool):
@@ -256,7 +274,7 @@ def _rec_kind(r) -> str:
 
 
 def _rec_sources(r) -> list[Mapping]:
-    """一条记录里可能藏着结束标记的几个位置，按查找顺序。"""
+    """The places in a record where an ending marker may be, in lookup order."""
     act = _rec_action(r)
     out = [act]
     for m in (act.get("input"), getattr(r, "output", None), getattr(r, "vars", None)):

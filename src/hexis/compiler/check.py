@@ -1,40 +1,52 @@
-"""候选机器检查（算法文档第 6 节，规则驱动）。
+"""Candidate machine checks (rule driven).
 
-6.1 变量与证据：按入边做不动点。A_q 取交集（进入 q 前可用的变量）；Z_q 取并集，元素是
-    「可能持有的证据集合」——证据来自技能的终点条件：某个状态静态匹配 required_evidence 且
-    成功分支 → 证据成立，失败分支 → 证据失效，分不出 → 两种可能；匹配 invalidating_events 的
-    状态使该终点的证据全部失效。带条件的终点要求 Z_q 里每个集合都含齐它的证据；回退终点不得
-    带条件。技能的 must_occur / before / forbid 要求也在图上静态检查。与结构检查一起组成 Check(M)。
-6.2 轨迹路径检查 Replay(M,T,π̃)：沿路径推进变量取值，任务输入与模型输出用占位值，工具输出用
-    事件末次调用的真实结果；判断状态选通向下一状态的标签；每步选中的转移须符合路径；工具所需
-    变量须已赋值且非空；末端须为结束状态；比较可观察事件序列。
+Variables and evidence: a fixed point over incoming edges. A_q is an intersection (the variables available before
+    entering q); Z_q is a union whose elements are "sets of evidence that may be held". Evidence comes from the
+    skill's terminal conditions: for a state that statically matches required_evidence, the success branch
+    establishes the evidence, the failure branch invalidates it, and when the branch cannot be told both are
+    possible; a state matching invalidating_events invalidates all evidence of that terminal. A conditioned terminal
+    requires every set in Z_q to contain all of its evidence; the fallback terminal must not be conditioned. The
+    skill's must_occur / before / forbid requirements are also checked statically on the graph. Together with the
+    structural checks this forms Check(M).
+Trace path check Replay(M,T,π̃): advance variable values along the path, using placeholder values for task inputs
+    and model outputs and the real result of the event's last call for tool outputs; judge states pick the label that
+    leads to the next state; the transition taken at every step must agree with the path; variables a tool needs
+    must be assigned and non-empty; the path must finish in an end state; the observable event sequences are compared.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Optional
 
-from hexis.machine import checks as _checks
-from hexis.machine import cond as _cond
-from hexis.execution.runtime import bind_outputs, rebuild
-from hexis.machine.schema import Machine, State
-from hexis.compiler.common import (branch_class, guaranteed, is_observable, need, reachable, seed_vars,
-                     static_match, terminal_kinds)
+from hexis.compiler.common import (
+    branch_class,
+    guaranteed,
+    is_observable,
+    need,
+    reachable,
+    seed_vars,
+    static_match,
+    terminal_kinds,
+)
 from hexis.compiler.context import CompileContext, EventPattern
 from hexis.compiler.traces import Prepared
+from hexis.execution.runtime import bind_outputs, rebuild
+from hexis.machine import checks as _checks
+from hexis.machine import cond as _cond
+from hexis.machine.schema import Machine, State
 
 ZSet = frozenset  # frozenset[frozenset[tuple[str, int]]]
 
 
 # --------------------------------------------------------------------------- #
-# 6.1 静态分析
+# Static analysis
 # --------------------------------------------------------------------------- #
 def _relaxed(pat: EventPattern) -> EventPattern:
     return EventPattern(**{**pat.__dict__, "success": None, "after": None})
 
 
 def post(z: ZSet, st: State, guard: str, ctx: CompileContext, m: Machine) -> ZSet:
-    """Post(Z, a, g)：证据集合经状态 st 与护卫 g 后的可能取值。"""
+    """Post(Z, a, g): the possible values of the evidence sets after state st and guard g."""
     if st.action.kind not in ("tool", "model", "user"):
         return z
     cls = branch_class(guard, ctx, st) if st.action.kind == "tool" else "success"
@@ -115,7 +127,8 @@ def _avoiding_reach(m: Machine, blocked: set) -> set:
 
 
 def requirement_findings(m: Machine, ctx: CompileContext) -> list[str]:
-    """技能要求的静态检查：must_occur（每条到非回退终点的路径都经过）、before、forbid。"""
+    """Static checks of skill requirements: must_occur (every path to a non-fallback terminal passes it), before,
+    forbid."""
     out: list[str] = []
     kinds = terminal_kinds(m)
     ends = {sid for sid, st in m.states.items()
@@ -124,25 +137,25 @@ def requirement_findings(m: Machine, ctx: CompileContext) -> list[str]:
         a_states = {sid for sid, st in m.states.items() if static_match(_relaxed(r.a), st, m)}
         if r.kind == "forbid":
             if a_states:
-                out.append(f"要求 {r.id}: 状态 {sorted(a_states)} 匹配了禁止的事件")
+                out.append(f"requirement {r.id}: states {sorted(a_states)} match a forbidden event")
             continue
         if r.kind == "must_occur":
             if not a_states:
-                out.append(f"要求 {r.id}: 没有状态能产生必须出现的事件 ({r.a.describe()})")
+                out.append(f"requirement {r.id}: no state can produce the required event ({r.a.describe()})")
                 continue
             leaked = ends & _avoiding_reach(m, a_states)
             if leaked:
-                out.append(f"要求 {r.id}: 不经 {sorted(a_states)} 也能到达终点 {sorted(leaked)}")
+                out.append(f"requirement {r.id}: terminals {sorted(leaked)} are reachable without passing {sorted(a_states)}")
         elif r.kind == "before" and r.b is not None:
             b_states = {sid for sid, st in m.states.items() if static_match(_relaxed(r.b), st, m)}
             bad = sorted(b_states & _avoiding_reach(m, a_states))
             if bad:
-                out.append(f"要求 {r.id}: {bad} 可在 ({r.a.describe()}) 之前到达")
+                out.append(f"requirement {r.id}: {bad} reachable before ({r.a.describe()})")
     return out
 
 
 def check(m: Machine, ctx: CompileContext) -> list[str]:
-    """Check(M) = G_structure ∧ G_variables ∧ G_evidence ∧ G_requirements。空列表 = 通过。"""
+    """Check(M) = G_structure ∧ G_variables ∧ G_evidence ∧ G_requirements. An empty list = passed."""
     out: list[str] = list(_checks.structural_findings(m))
     if m.initial not in m.states:
         return out
@@ -154,41 +167,41 @@ def check(m: Machine, ctx: CompileContext) -> list[str]:
         after = set(a_q) | set(guaranteed(st, ctx))
         miss = sorted(need(st) - a_q)
         if miss:
-            out.append(f"变量: {sid} 需要 {miss}，进入时不保证已定义")
+            out.append(f"variable: {sid} needs {miss}, not guaranteed to be defined on entry")
         for t in st.transitions:
             if t.cond:
                 try:
                     gv = _cond.vars_of(t.cond)
                 except _cond.CondError as exc:
-                    out.append(f"条件: {sid}→{t.to} {t.cond!r} 解析失败：{exc}")
+                    out.append(f"guard: {sid}→{t.to} {t.cond!r} failed to parse: {exc}")
                     continue
                 bad = sorted(set(gv) - after)
                 if bad:
-                    out.append(f"变量: {sid}→{t.to} 的条件读 {bad}，动作后仍未定义")
+                    out.append(f"variable: guard of {sid}→{t.to} reads {bad}, still undefined after the action")
             if t.to in an.reach:
                 nxt = an.avail[t.to]
                 if not nxt <= after:
-                    out.append(f"变量: {sid}→{t.to} 给不出 {sorted(nxt - after)}")
+                    out.append(f"variable: {sid}→{t.to} cannot provide {sorted(nxt - after)}")
                 zp = post(z_q, st, t.cond, ctx, m)
                 if not zp <= an.zstate[t.to]:
-                    out.append(f"证据: {sid}→{t.to} 的证据集合不在 {t.to} 的不变式内")
+                    out.append(f"evidence: evidence sets of {sid}→{t.to} are not within the invariant of {t.to}")
         if st.action.kind == "end":
             tc = conditions.get(st.action.terminal)
             if tc is not None:
                 ids = {(tc.terminal, i) for i in range(len(tc.required_evidence))}
                 lacking = sorted({i for held in z_q for (_t, i) in (ids - held)})
                 if lacking or not z_q:
-                    names = [tc.required_evidence[i].describe() for i in lacking] or ["全部"]
-                    out.append(f"证据: 终点 {sid}({tc.terminal}) 可能缺少证据 {names}")
+                    names = [tc.required_evidence[i].describe() for i in lacking] or ["all"]
+                    out.append(f"evidence: terminal {sid}({tc.terminal}) may lack evidence {names}")
     fb = m.states.get(m.fallback)
     if fb is not None and fb.action.kind == "end" and fb.action.terminal in conditions:
-        out.append(f"证据: 回退状态 {m.fallback} 不得使用带证据条件的终点")
+        out.append(f"evidence: fallback state {m.fallback} must not use a terminal with evidence conditions")
     out += requirement_findings(m, ctx)
     return list(dict.fromkeys(out))
 
 
 # --------------------------------------------------------------------------- #
-# 6.2 轨迹路径检查
+# Trace path check
 # --------------------------------------------------------------------------- #
 @dataclass
 class ReplayResult:
@@ -200,7 +213,7 @@ class ReplayResult:
 
 
 def _pick(m: Machine, st: State, values: dict):
-    """按运行时顺序选边：首条成立的转移。返回 (边, 错误)。"""
+    """Pick an edge in run-time order: the first transition that holds. Returns (edge, error)."""
     for t in st.ordered_transitions():
         if not t.cond:
             return t, ""
@@ -208,12 +221,13 @@ def _pick(m: Machine, st: State, values: dict):
             if _cond.evaluate(t.cond, values):
                 return t, ""
         except _cond.CondError as exc:
-            return None, f"{st.id} 的条件 {t.cond!r} 求值失败：{exc}"
+            return None, f"guard {t.cond!r} of {st.id} failed to evaluate: {exc}"
     return None, ""
 
 
 def _candidates(st: State, var: str, values: dict) -> list:
-    """一个由本状态写出的变量在它出边条件里被拿来比较的常量：回放时可选的取值。占位值排第一。"""
+    """Constants that a variable written by this state is compared with in its outgoing guards: the values replay may
+    choose from. The placeholder comes first."""
     opts: list = [f"<{var}>"]
     for t in st.transitions:
         if not t.cond:
@@ -233,7 +247,8 @@ def _candidates(st: State, var: str, values: dict) -> list:
 
 
 def _assignments(st: State, values: dict) -> list[dict]:
-    """状态写出的变量的候选取值组合。判断状态按标签；模型状态按出边条件里出现的常量，其余占位。"""
+    """Candidate value combinations for the variables a state writes. Judge states go by label; model states by the
+    constants that appear in outgoing guards, with placeholders for the rest."""
     a = st.action
     if a.kind == "judge":
         return [{a.writes[0]: label} for label in list(a.labels)]
@@ -251,10 +266,12 @@ def _assignments(st: State, values: dict) -> list[dict]:
 
 def _simulate_zero(m: Machine, sid: str, values: dict, target: str, *,
                    ignore_counters: bool, depth: int = 0) -> Optional[dict]:
-    """从 sid 出发只经零宽状态能否走到 target（按运行时选边规则推演）。
+    """Whether target can be reached from sid through zero-width states only (simulated with the run-time edge
+    selection rule).
 
-    返回各零宽状态该写出的取值 {状态: {变量: 值}}：判断状态是选中的标签，模型状态是出边条件里
-    能通向下一状态的常量（其余变量用占位值）。"""
+    Returns the values each zero-width state should write {state: {variable: value}}: the chosen label for judge
+    states, and for model states the constants in outgoing guards that lead to the next state (placeholder values for
+    the other variables)."""
     if depth > len(m.states) + 2:
         return None
     st = m.states.get(sid)
@@ -278,7 +295,8 @@ def _simulate_zero(m: Machine, sid: str, values: dict, target: str, *,
 
 def _choose_outputs(m: Machine, st: State, values: dict, target: Optional[str], *,
                     ignore_counters: bool) -> dict:
-    """可观察的模型 / 用户状态：写出能让下一跳通向 target 的取值；没有目标或都不行就用占位值。"""
+    """Observable model / user states: write values that make the next hop lead to target; with no target, or when
+    nothing works, use placeholder values."""
     options = _assignments(st, values)
     if target is None:
         return options[0]
@@ -307,12 +325,13 @@ def placeholders(m: Machine) -> dict:
 
 def replay(m: Machine, prep: Prepared, anchors: list[str], *, max_steps: int = 0,
            ignore_counters: bool = False) -> ReplayResult:
-    """Replay(M, T, π̃)。``anchors`` 是每个可观察事件对应的状态 id（末项是结束状态）。
+    """Replay(M, T, π̃). ``anchors`` holds the state id of every observable event (the last one is the end state).
 
-    ``ignore_counters`` 时计数变量不递增（上限出口永不触发），只用来数候选路径上的访问次数。"""
+    With ``ignore_counters`` counter variables are not incremented (bound exits never fire); this is used only to
+    count visits along the candidate path."""
     evs = prep.observable
     if len(anchors) != len(evs):
-        return ReplayResult(False, f"路径长度 {len(anchors)} 与可观察事件数 {len(evs)} 不符")
+        return ReplayResult(False, f"path length {len(anchors)} does not match the number of observable events {len(evs)}")
     values = placeholders(m)
     expect = prep.obs()
     events: list = []
@@ -324,19 +343,19 @@ def replay(m: Machine, prep: Prepared, anchors: list[str], *, max_steps: int = 0
     for _ in range(limit):
         st = m.states.get(cur)
         if st is None:
-            return ReplayResult(False, f"路径撞到不存在的状态 {cur}", path, events)
+            return ReplayResult(False, f"path hit a nonexistent state {cur}", path, events)
         path.append(cur)
         visits[cur] = visits.get(cur, 0) + 1
         a = st.action
         if is_observable(st):
             if i >= len(anchors) or anchors[i] != cur:
-                want = anchors[i] if i < len(anchors) else "(无)"
-                return ReplayResult(False, f"走到 {cur}，路径要求 {want}", path, events)
+                want = anchors[i] if i < len(anchors) else "(none)"
+                return ReplayResult(False, f"reached {cur}, the path requires {want}", path, events)
             ev = evs[i]
             if a.kind == "tool":
                 miss = [x for x in sorted(need(st)) if values.get(x) in (None, "")]
                 if miss:
-                    return ReplayResult(False, f"{cur} 需要 {miss}，到这一步未赋值或为空", path, events)
+                    return ReplayResult(False, f"{cur} needs {miss}, unassigned or empty at this step", path, events)
                 out = dict(ev.calls[-1].output) if ev.calls else {}
                 got = rebuild(bind_outputs(out, getattr(a, "binds", {}) or {}), list(a.writes))
                 for w in a.writes:
@@ -350,31 +369,31 @@ def replay(m: Machine, prep: Prepared, anchors: list[str], *, max_steps: int = 0
             elif a.kind == "end":
                 events.append(("end", a.terminal, True))
                 if i != len(anchors) - 1:
-                    return ReplayResult(False, f"在 {cur} 结束，但路径还有 {len(anchors) - 1 - i} 个事件", path, events)
+                    return ReplayResult(False, f"ended at {cur}, but the path still has {len(anchors) - 1 - i} events", path, events)
                 if events != expect:
-                    return ReplayResult(False, f"事件序列不同：机器 {events} vs 轨迹 {expect}", path, events)
+                    return ReplayResult(False, f"event sequences differ: machine {events} vs trace {expect}", path, events)
                 return ReplayResult(True, "", path, events, visits)
             i += 1
         elif a.kind in ("model", "judge"):
             if i >= len(anchors):
-                return ReplayResult(False, f"零宽状态 {cur} 出现在路径末端之后", path, events)
+                return ReplayResult(False, f"zero-width state {cur} appears after the end of the path", path, events)
             sim = _simulate_zero(m, cur, values, anchors[i], ignore_counters=ignore_counters)
             if sim is None:
-                what = "标签" if a.kind == "judge" else "取值"
-                return ReplayResult(False, f"{'判断' if a.kind == 'judge' else '模型'}状态 {cur} 没有{what}能通向 {anchors[i]}",
+                what = "label" if a.kind == "judge" else "value"
+                return ReplayResult(False, f"{'judge' if a.kind == 'judge' else 'model'} state {cur} has no {what} leading to {anchors[i]}",
                                     path, events)
             values.update(sim[cur])
         else:
-            return ReplayResult(False, f"{cur} 的动作类型 {a.kind} 不能回放", path, events)
+            return ReplayResult(False, f"action kind {a.kind} of {cur} cannot be replayed", path, events)
         chosen, err = _pick(m, st, values)
         if err:
             return ReplayResult(False, err, path, events)
         if chosen is None:
-            return ReplayResult(False, f"{cur} 没有可走的转移", path, events)
+            return ReplayResult(False, f"{cur} has no transition to take", path, events)
         if chosen.inc and not ignore_counters:
             values[chosen.inc] = int(values.get(chosen.inc) or 0) + 1
         cur = chosen.to
-    return ReplayResult(False, f"超过 {limit} 步仍未到结束状态", path, events)
+    return ReplayResult(False, f"no end state reached within {limit} steps", path, events)
 
 
 __all__ = ["Analysis", "ReplayResult", "analyze", "check", "placeholders", "post", "replay",

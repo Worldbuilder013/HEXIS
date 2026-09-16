@@ -1,6 +1,6 @@
 <div align="center">
 
-# skill2fsm
+# hexis
 
 **Compile agent skills into extended finite state machines.**
 
@@ -8,82 +8,86 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](CHANGELOG.md)
 
-[Why](#why-skill2fsm) · [Installation](#installation) · [Quick start](#quick-start) · [Concepts](#concepts) ·
-[CLI](#command-line-interface) · [Evaluation](#evaluation) · [Development](#development) · [Citation](#citation)
+[Why](#why-hexis) · [Installation](#installation) · [Quick start](#quick-start) · [Concepts](#concepts) ·
+[Updating](#updating-a-machine-with-a-model) · [Using a machine](#using-a-machine) · [CLI](#command-line-interface) ·
+[Evaluation](#evaluation) · [Development](#development) · [Citation](#citation)
 
 </div>
 
 ---
 
-## Why skill2fsm
+## Why hexis
 
 An agent skill (a `SKILL.md` document) tells an agent how to carry out a class of tasks. In the usual way of
 executing a skill, the document sits in the model's context and the model chooses every next step, so
-requirements that the document states clearly can still be skipped, reordered or applied in the wrong
-situation.
+requirements that the document states clearly can still be skipped, reordered or applied in the wrong situation.
 
-skill2fsm compiles the skill into an **extended finite state machine**. The machine records progress in a
-current state and a set of variables, executes the operation assigned to the current state and evaluates
-transition guards over the recorded values to decide what comes next. Language models do the reasoning and
-generation inside states, with the state's prompt and the variables it reads; the order of operations is
-enforced by the program.
+hexis compiles the skill into an **extended finite state machine**. The machine records progress in a current
+state and a set of variables, executes the operation assigned to the current state and evaluates transition
+guards over the recorded values to decide what comes next. Language models do the reasoning and generation inside
+states, with the state's prompt and the variables it reads; the order of operations is enforced by the program.
 
 This package accompanies the paper *Compiling Agent Skills into Extended Finite State Machines*.
 
 ## Highlights
 
-- **Readable, executable machines.** Plain JSON (`efsm-v1`) with typed variables, `tool` / `model` /
-  `judge` / `user` / `end` actions, ordered guarded transitions, bounded loops and a fallback state.
-- **Compilation from documents and traces.** A model drafts the initial machine from the skill document
-  and redrafts it under check feedback; each trace then updates the machine without model calls through
-  normalization, alignment, candidate construction, static checks and replay of every accepted trace.
-- **Stepwise mode.** Incorporate traces step by step with decisions supplied by an external judge.
-- **Graceful degradation.** The fallback state retries from the most recent tool step and then hands the
-  task to interpreted execution of the skill, so a partially learned machine can still finish a task.
-- **Real tool backends.** OpenCode's native tools, a local `bash` backend, or tools that the model realizes
-  from registry definitions.
-- **Evaluation harness.** Parallel comparison of machines with direct skill execution and memory baselines
-  (Agent Workflow Memory, ReasoningBank); graders for spreadsheet, multiple-choice and file-answer tasks;
-  paired exact tests.
-- **Hermetic test suite.** More than 300 tests that need no network access, model endpoint or API key.
+- **Compile with any OpenAI-compatible model.** Choose the model, endpoint and key variable on the command line
+  (`--model`, `--base-url`, `--api-key-env`); the model drafts the machine and redrafts it under check feedback.
+- **Update with new traces, one decision per step.** A model decides for every step of a new trace whether an
+  existing state produces it, a new state is needed, or the step is noise. Static checks and replay of *every*
+  previously accepted trace guard each change, so a wrong decision cannot break the machine. Answers are cached
+  and runs resume where they stopped.
+- **Usage guides.** Every build gets `GUIDE.md` (inputs, tools, a diagram, every state and transition) and
+  `PROMPT.md`, a system prompt that lets any tool-using agent execute the machine step by step.
+- **Readable, executable machines.** Plain JSON (`efsm-v1`) with typed variables, `tool` / `model` / `judge` /
+  `user` / `end` actions, ordered guarded transitions, bounded loops and a fallback state.
+- **Graceful degradation.** The fallback state retries from the most recent tool step and then hands the task to
+  interpreted execution of the skill, so a partially learned machine can still finish a task.
+- **Real tool backends.** OpenCode's native tools, a local `bash` backend, or tools that the model realizes from
+  registry definitions.
+- **Evaluation harness.** Parallel comparison of machines with direct skill execution and memory baselines (Agent
+  Workflow Memory, ReasoningBank); graders for spreadsheet, multiple-choice and file-answer tasks; paired exact tests.
+- **Hermetic test suite.** More than 350 tests that need no network access, model endpoint or API key.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    doc["SKILL.md + compile.json"] --> init["Initialization<br/>model drafts M0,<br/>checks give feedback"]
-    reg["Tool registry"] --> init
-    init --> upd["Trace update (no model)<br/>normalize · align · modify<br/>check · replay · accept"]
-    traces["Execution traces"] --> upd
-    upd --> machine[("machine.json")]
-    machine --> run["Runtime<br/>states · guards · counters"]
+    doc["SKILL.md + compile.json"] --> compile["compile<br/>model drafts M0,<br/>checks give feedback"]
+    reg["Tool registry"] --> compile
+    compile --> build[("build directory<br/>machine.json")]
+    traces["New traces"] --> update["update<br/>model decides each step<br/>check · replay · accept"]
+    build --> update --> build
+    build --> guide["GUIDE.md + PROMPT.md"]
+    build --> run["run<br/>states · guards · counters"]
     run -- "tool calls" --> tools["OpenCode / local bash"]
     run -- "inside states" --> llm["Language model"]
     run -- "retries exhausted" --> interp["Interpreted execution<br/>of SKILL.md"]
 ```
 
-1. **Initialization.** The model reads the skill document, its clauses, the tool definitions, the task
-   input fields and the skill rules, and drafts a machine. Static checks (format, schema, guards,
-   reachability and termination, clause coverage, tools) return errors to the model until a draft passes.
-2. **Trace update.** Each trace is normalized into events, aligned with the machine, and turned into a
-   candidate machine by reusing or adding states and transitions. The candidate is accepted only if it
-   passes the variable, evidence, requirement and structure checks and replays the new trace and every
-   previously accepted trace.
-3. **Execution.** The runtime executes the action of the current state, writes the declared variables and
-   takes the first transition whose guard holds. Models are called only for `model` and `judge` states.
+1. **Compile.** The model reads the skill document, its clauses, the tool definitions, the task input fields and
+   the skill rules, and drafts a machine. Static checks (format, schema, guards, reachability and termination,
+   clause coverage, tools) return errors to the model until a draft passes.
+2. **Update.** Each trace is normalized into events. For every step the decider (a model, a decisions file, or
+   deterministic alignment) chooses how the machine accounts for it, a candidate machine is built by reusing or
+   adding states and transitions, and the candidate is accepted only if it passes the variable, evidence,
+   requirement and structure checks and replays the new trace and every previously accepted trace.
+3. **Execution.** The runtime executes the action of the current state, writes the declared variables and takes
+   the first transition whose guard holds. Models are called only for `model` and `judge` states.
 
 ## Installation
 
 ```bash
-pip install .            # from a checkout; Python >= 3.11
-pip install ".[all]"     # with every optional extra
+pip install hexis-agent             # the package is imported as `hexis`; the command is `hexis-agent`
+pip install "hexis-agent[all]"      # with every optional extra
+pip install .                       # from a checkout; Python >= 3.11
 ```
 
 | Extra | Adds | Needed for |
 |---|---|---|
 | `xlsx` | openpyxl | grading spreadsheet tasks |
-| `memory` | numpy, sentence-transformers | `skill2fsm memory index / precompute / retrieve` |
-| `dev` | pytest, build, twine | tests and packaging |
+| `memory` | numpy, sentence-transformers | `hexis-agent memory index / precompute / retrieve` |
+| `dev` | pytest, build, twine, ruff | tests, linting and packaging |
 
 Running machines on real tasks also requires:
 
@@ -95,12 +99,12 @@ Running machines on real tasks also requires:
 
 ## Quick start
 
-The package ships a small hermetic example skill, `table_clean`, with scripted tools and a scripted model,
-so a machine runs without network access:
+The package ships a small hermetic example skill, `table_clean`, with scripted tools and a scripted model, so a
+machine runs without network access:
 
 ```python
-from skill2fsm import runtime
-from skill2fsm.examples import table_clean as tc
+from hexis.execution import runtime
+from hexis.examples import table_clean as tc
 
 machine = tc.reference_machine()
 task = tc.gen_tasks(1, seed=0)[0]
@@ -114,25 +118,29 @@ print(result.stopped, " -> ".join(result.path()), tc.verify(task, result.trace))
 # terminal s1 -> s2 -> s4 -> end True
 ```
 
-With a real skill, the pipeline is: collect traces, compile, run.
+With a real skill and a model endpoint:
 
 ```bash
-# 1. Execute the skill with OpenCode; event streams are folded into traces
-skill2fsm collect --tasks-file tasks.yaml --skill path/to/skill --out traces/ --model qwen3.6-flash
+export API_KEY=...                         # or put MODEL / BASE_URL / API_KEY in a .env file
+M="--model qwen3.6-flash --base-url https://your-endpoint/v1"
 
-# 2. Initialize a machine from SKILL.md with the model, then update it over the traces (no model)
-skill2fsm compile --skill path/to/skill --traces traces/ --out build/
+# 1. compile a machine from the skill document
+hexis-agent compile --skill path/to/skill --out build/ $M
 
-# 3. Execute the machine on a task
-skill2fsm run --machine build/machine.json --skill path/to/skill \
-    --workbook input.xlsx --prompt "..." --golden golden.xlsx --answer-position B2:B17
+# 2. collect traces (for example with `hexis-agent collect`) and fold them into the machine
+hexis-agent update --build build/ --traces traces/ --show 3    # preview: no model calls, nothing written
+hexis-agent update --build build/ --traces traces/ $M
+
+# 3. use the machine
+cat build/GUIDE.md                          # how the machine works; build/PROMPT.md is the agent prompt
+hexis-agent run --mode task --machine build/ --input request="..." --workdir work/ --executor local $M
 ```
 
 ## Concepts
 
 ### Machines
 
-A machine is a JSON document in the `efsm-v1` format (`skill2fsm.schema.Machine`):
+A machine is a JSON document in the `efsm-v1` format (`hexis.machine.schema.Machine`):
 
 ```json
 {
@@ -176,13 +184,13 @@ A machine is a JSON document in the `efsm-v1` format (`skill2fsm.schema.Machine`
 | `variables` | Initialized from task inputs (`init_from`) or constants (`init`) and written by actions |
 | `tool` action | Runs a named tool; `${var}` in the argument template is substituted at run time; outputs are written to `writes` |
 | `model` action | Generates the listed variables from the state's prompt and the variables it reads |
-| `judge` action | Chooses one label from a fixed set, or abstains |
+| `judge` action | Chooses one label from a fixed set, or abstains (the abstain label is `abstain`) |
 | `user` / `end` action | Asks for input / finishes with a terminal |
 | `transitions` | Evaluated in order after the action; the first guard that holds is taken; an empty guard is unconditional and comes last; `inc` increments a loop counter |
 | `fallback` | Retries from the most recent tool step, then hands the task to interpreted execution of the skill |
 
-Guards use a small whitelisted expression language (`skill2fsm.cond`) that supports static checks of
-mutual exclusion and loop bounds; it never calls `eval`.
+Guards use a small whitelisted expression language (`hexis.machine.cond`) that supports static checks of mutual
+exclusion and loop bounds; it never calls `eval`.
 
 ### Traces
 
@@ -195,13 +203,14 @@ Traces are JSON Lines files: a header with the task and its verdict, then one li
 {"kind": "end"}
 ```
 
-`skill2fsm collect` and `skill2fsm fold-traces` produce this format from OpenCode event streams.
+`hexis-agent collect` and `hexis-agent fold-traces` produce this format from OpenCode event streams.
 
 ### Skill rules
 
-A `compile.json` next to `SKILL.md` declares terminals, derived labels, requirements and terminal
-conditions. Every rule quotes the sentence of the skill document it comes from. Without the file, the
-compiler asks the model to extract the rules and checks each quote against the document.
+A `compile.json` next to `SKILL.md` declares terminals, derived labels, requirements and terminal conditions. Every
+rule quotes the sentence of the skill document it comes from. Without the file, the compiler asks the model to
+extract the rules and checks each quote against the document; the effective rules are saved as `rules.json` in the
+build directory.
 
 ```json
 {
@@ -226,44 +235,113 @@ compiler asks the model to extract the rules and checks each quote against the d
 
 ### Tools
 
-Tool definitions come from a registry (`skill2fsm/backends/opencode.json` describes OpenCode's native
-tools) or are inferred from traces. The compiler treats tool names as opaque identifiers. At run time a
-machine may only use tools that the backend provides, or tools defined in a `--tools` registry, which the
-model then realizes as shell commands; tools are never silently substituted.
+Tool definitions come from a registry (`hexis/tools/backends/opencode.json` describes OpenCode's native tools, or
+pass `--tools registry.json`) or are inferred from traces. The compiler treats tool names as opaque identifiers.
+At run time a machine may only use tools that the backend provides, or tools defined in a `--tools` registry,
+which the model then realizes as shell commands; tools are never silently substituted.
+
+### Build directory
+
+`compile --out BUILD` writes everything a later `update` needs:
+
+| File | Contents |
+|---|---|
+| `machine.json` / `machine_init.json` | the current machine / the initial machine |
+| `build.json` | manifest: skill, tool registry and rules sources, one record per run (command, decider, model id and base URL, outcomes, token usage); never an API key |
+| `skill/SKILL.md`, `tools.json`, `rules.json` | the inputs of the compilation |
+| `traces/` | copies of every trace used, named `<file stem>-<content hash>.jsonl` |
+| `progress.json` | the outcome of every trace and the accepted traces that protect the machine |
+| `decisions.jsonl` | every model question and answer (the cache of `update`) |
+| `report.md`, `context.json`, `init_log.json`, `update_log.json` | reports and logs |
+| `GUIDE.md`, `PROMPT.md` | usage guide and agent prompt |
+
+## Updating a machine with a model
+
+```bash
+hexis-agent update --build build/ --traces new_traces/ --model MODEL --base-url URL
+```
+
+For each new trace, and for each step of it, the model sees the step (tool, arguments, results, narration), the
+task inputs, the skill's clauses and the candidate states that could produce the step, and answers:
+
+```json
+{"decision": "match | new | ignore | exclude", "state": "<candidate id or null>",
+ "purpose": "<one sentence>", "clause": "<clause id or empty>"}
+```
+
+- `match` reuses a state (adding a transition if needed); `new` adds a state whose argument prompt is built from
+  the purpose; `ignore` removes harness noise from the trace; `exclude` leaves the whole trace out.
+- A candidate machine is accepted only if it passes the checks, replays the new trace and replays **every trace
+  accepted before**, including those of earlier runs. Otherwise the machine is unchanged and the trace is
+  recorded as rejected.
+- Answers are cached in `decisions.jsonl`: running the same command again asks nothing new, and after an
+  interruption (exit status 3) it continues where it stopped. `--no-cache` asks again.
+- The deterministic proposal is never shown to the model; it is used only when the model gives no valid answer
+  after one repair turn.
+- Cost: about one model call per trace step. `--show N` previews pending traces and the number of steps without
+  calling the model; `--max-traces N` limits a run.
+- Other deciders: `--decisions FILE` applies decisions written by a person or another tool (the same JSON shape
+  per step, keyed by trace), and `--decider align` uses deterministic alignment without any model calls. `compile
+  --traces` uses deterministic alignment by default and a model with `--decider model`.
+
+Before processing anything, `update` checks that the current machine still passes the checks and replays every
+accepted trace; if it does not (for example after a manual edit, or when tool definitions inferred from traces
+changed), it stops with exit status 2 without changing anything.
+
+## Using a machine
+
+- **Read the guide.** `GUIDE.md` lists the task inputs, the tools, a Mermaid diagram, every state with its prompt
+  or tool call, the transitions in evaluation order, loop limits and fallback behaviour.
+- **Run it.** `hexis-agent run --mode task --machine BUILD --input KEY=VALUE ... --workdir DIR` runs the machine
+  on any inputs with the hexis runtime (`--executor local` runs `bash` in a subprocess, the default executor uses
+  OpenCode's tools). The benchmark modes `xlsx`, `livemath` and `filetask` also grade the result.
+- **Give it to an agent.** `PROMPT.md` is a system prompt that tells a tool-using agent (for example Claude Code
+  or OpenCode) how to execute the machine state by state: the execution loop, variables, the guard language, the
+  tools, every state and its transitions, the finishing report and the fallback procedure. `hexis-agent guide
+  --embed-skill` appends the skill document so the agent can finish a task after falling back.
+- **From Python.** `hexis.execution.runtime.run_task(machine, {"input": {...}}, model=..., tools=..., doc=...)`.
+
+`hexis-agent guide --build BUILD` (or `--machine machine.json`) regenerates both files; `compile` and `update`
+write them automatically unless `--no-guide` is given.
 
 ## Command-line interface
 
 | Command | Purpose |
 |---|---|
-| `skill2fsm compile` | Initialize a machine from a skill document (model) and update it over traces (no model) |
-| `skill2fsm compile-stepwise` | Update a machine trace by trace with step decisions supplied by a judge |
-| `skill2fsm run` | Execute a machine on one task (`xlsx`, `livemath` or `filetask` mode) |
-| `skill2fsm collect` | Execute a skill with OpenCode on spreadsheet tasks and save traces |
-| `skill2fsm fold-traces` | Turn the skill-arm event streams of a benchmark run into traces |
-| `skill2fsm bench` | Run machine and skill-execution arms on a task set in parallel |
-| `skill2fsm memory` | Build Agent Workflow Memory workflows and ReasoningBank memories |
-| `skill2fsm summarize` | Compare arms on shared tasks: pass rate, time, tokens, paired exact tests |
+| `hexis-agent compile` | Initialize a machine from a skill document with a model, optionally fold in traces; writes a build directory |
+| `hexis-agent update` | Fold new traces into a build; a model (or a decisions file, or deterministic alignment) decides every step |
+| `hexis-agent guide` | Write `GUIDE.md` and `PROMPT.md` for a machine |
+| `hexis-agent run` | Execute a machine on one task (`task`, `xlsx`, `livemath` or `filetask` mode) |
+| `hexis-agent compile-stepwise` | Update a machine trace by trace with step decisions from a file (`--show`, `--apply`, `--report`) |
+| `hexis-agent collect` | Execute a skill with OpenCode on spreadsheet tasks and save traces |
+| `hexis-agent fold-traces` | Turn the skill-arm event streams of a benchmark run into traces |
+| `hexis-agent bench` | Run machine and skill-execution arms on a task set in parallel |
+| `hexis-agent memory` | Build Agent Workflow Memory workflows and ReasoningBank memories |
+| `hexis-agent summarize` | Compare arms on shared tasks: pass rate, time, tokens, paired exact tests |
 
-Run `skill2fsm <command> --help` for all options; `python -m skill2fsm` is equivalent to `skill2fsm`.
+Run `hexis-agent <command> --help` for all options; `python -m hexis` is equivalent to `hexis-agent`.
 
 ### Configuration
 
 | Setting | Effect |
 |---|---|
-| `MODEL`, `BASE_URL`, `API_KEY` | Endpoint used by `--provider default` (the default) |
-| `MINIMAX_API_KEY`, `MINIMAX_MODEL`, `MINIMAX_BASE_URL` | Endpoint used by `--provider minimax` |
-| `DEEPSEEK_API_KEY`, `DEEPSEEK_MODEL`, `DEEPSEEK_BASE_URL` | Endpoint used by `--provider deepseek` |
+| `--model`, `--base-url` | Model id and OpenAI-compatible base URL; override `MODEL` / `BASE_URL` |
+| `--api-key-env NAME` | Environment variable that holds the API key (default `API_KEY`); keys are never passed on the command line |
+| `--provider NAME` | Read `NAME_MODEL`, `NAME_BASE_URL`, `NAME_API_KEY` instead (built-in defaults for `minimax` and `deepseek`) |
+| `MODEL`, `BASE_URL`, `API_KEY` | Default endpoint |
 | `.env` | Read from the working directory upward; variables already set in the environment take precedence |
-| `LABEL=self` | Memory baselines label trajectories by model self-judgement instead of the grader |
-| `--no-think`, `--think-budget`, `--judge-think-budget` | Reasoning controls for Qwen-compatible endpoints |
+| `--temperature`, `--max-tokens`, `--llm-timeout`, `--llm-retries`, `--stream`, `--extra-body JSON` | Request settings for `compile` and `update` (`--extra-body` is merged into every request, e.g. `'{"enable_thinking": false}'`) |
+| `--no-think`, `--think-budget`, `--judge-think-budget` | Reasoning controls of `run` for Qwen-compatible endpoints |
+| `LABEL=self` | Memory baselines label trajectories by model self-judgement (`hexis-agent memory judge`) instead of the grader |
 
-See `.env.example` for a template.
+See `.env.example` for a template. Exit statuses: 0 success, 2 usage, configuration or build problem, 3 model
+endpoint failure or interruption (progress is saved).
 
 ## Evaluation
 
-`skill2fsm bench` runs arms on a task set: `fsm` (a compiled machine), `skill` (OpenCode with the skill in
-the system prompt), and `awm` / `rbank` (the skill arm with Agent Workflow Memory workflows or ReasoningBank
-memories placed before the prompt). Task files are YAML lists:
+`hexis-agent bench` runs arms on a task set: `fsm` (a compiled machine), `skill` (OpenCode with the skill in the
+system prompt), and `awm` / `rbank` (the skill arm with Agent Workflow Memory workflows or ReasoningBank memories
+placed before the prompt). Task files are YAML lists:
 
 ```yaml
 - id: t1
@@ -281,77 +359,75 @@ memories placed before the prompt). Task files are YAML lists:
 | `filetask` | `verifier`, `answers` or `answer`, `assets` or `assets_dir` + `assets_target` | `dabench`: `@name[value]` with the reference precision; `sealqa_judge`: recorded for an external judge |
 
 ```bash
-skill2fsm bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
+hexis-agent bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
     --arms fsm,skill --machine build/machine.json --skill path/to/skill --out runs/test
 
 # memory baselines built from a development run and frozen for the test run
-skill2fsm memory convert runs/dev dev_traj.jsonl
-skill2fsm memory awm dev_traj.jsonl workflows.txt
-skill2fsm memory rbank dev_traj.jsonl bank.jsonl
-skill2fsm memory index bank.jsonl
-skill2fsm memory precompute bank.jsonl tasks.yaml test_ids.txt rbank.json --mode filetask
-skill2fsm bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
+hexis-agent memory convert runs/dev dev_traj.jsonl
+hexis-agent memory awm dev_traj.jsonl workflows.txt
+hexis-agent memory rbank dev_traj.jsonl bank.jsonl
+hexis-agent memory index bank.jsonl
+hexis-agent memory precompute bank.jsonl tasks.yaml test_ids.txt rbank.json --mode filetask
+hexis-agent bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
     --arms awm,rbank --awm-file workflows.txt --rbank rbank.json --skill path/to/skill --out runs/test
 
-skill2fsm summarize table.md "Test split" fsm=runs/test skill=runs/test awm=runs/test rbank=runs/test
+hexis-agent summarize table.md "Test split" fsm=runs/test skill=runs/test awm=runs/test rbank=runs/test
 ```
 
 ## Project layout
 
 ```text
-src/skill2fsm/
-├── schema.py             machine and trace data model (efsm-v1)
-├── cond.py               guard language: parser, evaluator, static analysis
-├── runtime.py            interpreter with retries and fallback
-├── fsm/                  compiler
-│   ├── context.py        compile context: task inputs, tools, skill rules
-│   ├── init.py           model-based initialization and its checks
-│   ├── traces.py         trace normalization into events and labels
-│   ├── align.py          alignment of trace events with machine states
-│   ├── modify.py         candidate construction
-│   ├── check.py          static checks and replay
-│   ├── update.py         acceptance of candidates, trace by trace
-│   └── stepwise.py       stepwise update with external decisions
-├── backends/             tool registries and model-realized tools
-├── opencode_tools.py     OpenCode tool backend
-├── local_tools.py        local subprocess backend
-├── llm_client.py         OpenAI-compatible client and model adapter
-├── env.py                endpoint configuration
+src/hexis/
+├── machine/              efsm-v1 schema, guard language, structural checks
+├── compiler/             compile context, initialization, trace normalization, alignment,
+│                         candidate construction, checks and replay, update, stepwise decisions
+├── execution/            runtime interpreter with retries and fallback
+├── llm/                  OpenAI-compatible client, endpoint configuration, model protocol
+├── tools/                tool registries and backends (OpenCode, local subprocess, model-realized)
+├── traces/               trace formats, normalization, phase classification, judging
 ├── evaluators/           graders
 ├── examples/table_clean/ hermetic example skill
-└── cli/                  the skill2fsm command
-tests/                    hermetic test suite
+├── builddir.py           build directories
+├── updater.py            the update loop shared by compile and update
+├── step_judge.py         the model that decides trace steps
+├── guide.py              GUIDE.md and PROMPT.md
+├── cli/                  the hexis-agent command
+└── legacy/               modules of an earlier compiler iteration (not used by the CLI)
+tests/                    hermetic test suite (tests/legacy covers the legacy modules)
 ```
-
-Code comments and some diagnostic messages are written in Chinese. A few modules from earlier iterations of
-the compiler (such as `compile_agent`, `compiler` and `checker`) are still used internally.
 
 ### Python API
 
 | Module | Contents |
 |---|---|
-| `skill2fsm.schema` | `Machine`, `State`, actions, `Transition`, `Variable`, `Trace`, `load_machine` |
-| `skill2fsm.runtime` | `run_task`: execute a machine with a model and tools |
-| `skill2fsm.fsm` | `context.build_context`, `init.initialize`, `traces.load_traces`, `update.update`, `stepwise` |
-| `skill2fsm.llm_client` | OpenAI-compatible client (`client_from_env`) and `ModelAdapter` |
-| `skill2fsm.opencode_tools`, `skill2fsm.local_tools` | Tool backends |
-| `skill2fsm.evaluators` | Graders |
+| `hexis.machine.schema` | `Machine`, `State`, actions, `Transition`, `Variable`, `Trace`, `load_machine` |
+| `hexis.execution.runtime` | `run_task`: execute a machine with a model and tools |
+| `hexis.compiler` | `context.build_context`, `init.initialize`, `traces.load_traces`, `update.update`, `stepwise`, `decide.decide_trace` |
+| `hexis.llm.llm_client` | OpenAI-compatible client (`client_from_env`) and `ModelAdapter` |
+| `hexis.tools.opencode_tools`, `hexis.tools.local_tools` | Tool backends |
+| `hexis.guide` | `render_guide`, `render_prompt`, `mermaid` |
+| `hexis.evaluators` | Graders |
 
 ## Development
 
 ```bash
 pip install -e ".[dev,xlsx]"
 pytest                                   # hermetic; OpenCode tests are skipped without the opencode executable
+ruff check src tests
 python -m build && twine check --strict dist/*
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines and [CHANGELOG.md](CHANGELOG.md) for release notes.
 
-## Security
+## Security and privacy
 
-skill2fsm executes tool calls whose arguments are generated by language models, including shell commands.
-Run it in an isolated environment and only with machines and task files you trust. See
-[SECURITY.md](SECURITY.md).
+hexis executes tool calls whose arguments are generated by language models, including shell commands. Run it in an
+isolated environment and only with machines and task files you trust. See [SECURITY.md](SECURITY.md).
+
+`update` sends trace steps (tool arguments and shortened results) and the skill's clauses to the configured model
+endpoint, and a build directory keeps copies of the traces and every question sent. `PROMPT.md` contains the whole
+machine, including prompts derived from the skill document; the runtime itself only ever shows a model the prompt
+of the state it is executing. Review build directories and prompts before sharing them.
 
 ## License
 
@@ -362,7 +438,7 @@ MIT (see [LICENSE](LICENSE)), except for the portions listed in
 ## Citation
 
 ```bibtex
-@misc{skill2fsm2026,
+@misc{hexis2026,
   title  = {Compiling Agent Skills into Extended Finite State Machines},
   author = {Anonymous Authors},
   year   = {2026},
@@ -374,6 +450,6 @@ Citation metadata is also available in [CITATION.cff](CITATION.cff).
 
 ## Acknowledgements
 
-skill2fsm builds on [SpreadsheetBench](https://github.com/RUCKBReasoning/SpreadsheetBench) for spreadsheet
-grading, on [Agent Workflow Memory](https://github.com/zorazrw/agent-workflow-memory) and ReasoningBank for
-the memory baselines, and on [OpenCode](https://opencode.ai) for tool execution.
+hexis builds on [SpreadsheetBench](https://github.com/RUCKBReasoning/SpreadsheetBench) for spreadsheet grading, on
+[Agent Workflow Memory](https://github.com/zorazrw/agent-workflow-memory) and ReasoningBank for the memory
+baselines, and on [OpenCode](https://opencode.ai) for tool execution.

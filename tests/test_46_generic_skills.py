@@ -1,8 +1,10 @@
-"""编译器不预设技能形态：只读检索、纯文本生成、文件修改、自定义工具流程各编一遍。
+"""The compiler assumes no particular skill shape: compile a read-only retrieval, a plain text generation, a file
+modification and a custom tool workflow once each.
 
-全部密闭：工具定义手写在测试里，初始机器手写（不调模型），轨迹合成。检查的是：
-上下文只来自文档 / 工具定义 / 轨迹 / 规则；没有 apply 的技能照样更新；工具名原样保留；
-未知工具接口标为推断；认不出的事件不被丢掉；``hexis/compiler`` 里没有任何技能或字段名。
+All hermetic: tool definitions are written by hand in the tests, initial machines are hand-written (no model calls),
+traces are synthetic. What is checked: the context comes only from the document / tool definitions / traces / rules;
+a skill without apply still updates; tool names are kept verbatim; unknown tool interfaces are marked inferred;
+unrecognized events are not dropped; ``hexis/compiler`` contains no skill or field names.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ FSM_DIR = pathlib.Path(__file__).resolve().parents[1] / "src" / "hexis" / "compi
 
 
 # --------------------------------------------------------------------------- #
-# 合成轨迹
+# Synthetic traces
 # --------------------------------------------------------------------------- #
 def tool(step, name, args, out=None, ok=True):
     out = dict(out or {})
@@ -66,7 +68,7 @@ def spec(name, inputs, outputs, success, primary, description="", label=""):
 
 
 # --------------------------------------------------------------------------- #
-# 1. 只读检索：search → open → 总结。没有任何修改，照样能更新。
+# 1. Read-only retrieval: search → open → summary. No modification at all, and it still updates.
 # --------------------------------------------------------------------------- #
 RETRIEVAL_DOC = """# Research
 Search for sources with the search tool. Open at least one result before answering.
@@ -132,7 +134,8 @@ def test_retrieval_accepts_read_only_trace_and_excludes_requirement_violation(re
 
 
 # --------------------------------------------------------------------------- #
-# 2. 纯文本生成：草稿是结构化的模型产出，lint 通过才交付；重写草稿使证据失效
+# 2. Plain text generation: the draft is structured model output, delivered only when lint passes; rewriting the
+#    draft invalidates the evidence
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def textgen():
@@ -174,7 +177,7 @@ def test_textgen_structured_model_output_is_observable_and_drives_evidence(textg
 
 
 # --------------------------------------------------------------------------- #
-# 3. 文件修改：修改后读产出 → 派生标签 verify → 已验证终点
+# 3. File modification: read the output after modifying → derived label verify → verified terminal
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def filemod():
@@ -228,18 +231,19 @@ def test_filemod_derived_label_and_verified_terminal(filemod):
     assert res.counts() == {"accepted": 2}, res.entries
     assert C.check(res.machine, ctx) == []
     s4 = res.machine.states["s4"].action
-    assert s4.input["filePath"] == "${output_path}"                     # 相对路径也认出是产出路径
+    assert s4.input["filePath"] == "${output_path}"                     # a relative path is also recognized as the output path
 
 
 def test_filemod_machine_without_verify_before_verified_end_fails_check(filemod):
     ctx, m0, _g, _u = filemod
-    m0.states["s4"].transitions[0].to = "END_VERIFIED"                  # 修改后直接宣称已验证
+    m0.states["s4"].transitions[0].to = "END_VERIFIED"                  # claims verified right after the modification
     errs = C.check(m0, ctx)
-    assert any("证据" in e and "END_VERIFIED" in e for e in errs), errs
+    assert any("evidence" in e and "END_VERIFIED" in e for e in errs), errs
 
 
 # --------------------------------------------------------------------------- #
-# 4. 自定义工具流程：query_db → aggregate → 总结。工具没有注册表定义，接口只从轨迹推断。
+# 4. Custom tool workflow: query_db → aggregate → summary. The tools have no registry definition; their interfaces
+#    are inferred from traces only.
 # --------------------------------------------------------------------------- #
 @pytest.fixture
 def custom():
@@ -277,7 +281,7 @@ def test_custom_tools_are_opaque_and_inferred(custom):
     ctx, m0, good = custom
     assert ctx.tools["query_db"].source == "inferred" and ctx.tools["query_db"].success == "ok == True"
     assert ctx.tools["aggregate"].primary == "value"
-    assert any("没有注册表定义" in n for n in ctx.notes)
+    assert any("no registry definition" in n for n in ctx.notes)
     assert C.check(m0, ctx) == []
     res = update(m0, [("good.jsonl", good, "")], ctx)
     assert res.counts() == {"accepted": 1}, res.entries
@@ -303,7 +307,7 @@ def test_custom_new_tool_state_keeps_opaque_name_and_generates_params(custom):
 
 
 # --------------------------------------------------------------------------- #
-# 通用性守卫
+# Generality guards
 # --------------------------------------------------------------------------- #
 def test_unknown_event_kind_is_reported_not_dropped(retrieval):
     ctx, m0, good, _bad = retrieval
@@ -323,4 +327,4 @@ def test_compiler_has_no_domain_or_tool_names(word):
         for i, line in enumerate(p.read_text(encoding="utf-8").splitlines(), 1):
             if re.search(rf"\b{re.escape(word)}\b", line):
                 hits.append(f"{p.name}:{i}")
-    assert not hits, f"{word!r} 出现在编译器里：{hits}"
+    assert not hits, f"{word!r} appears in the compiler: {hits}"

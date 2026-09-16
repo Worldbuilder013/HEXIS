@@ -1,66 +1,83 @@
-"""把一次真实的 agent 循环折成 :class:`~hexis.machine.schema.Trace`，并解析核验工具的输出。
+"""Fold one real agent loop into a :class:`~hexis.machine.schema.Trace`, and parse the output of check tools.
 
-这个模块坐在**采集**与**编译**之间，是三臂实验里唯一一处「原始运行 → 训练数据」的转换。
-它做三件事，每一件错了都会让下游安静地失去意义：
+This module sits between **collection** and **compilation**, and is the only place in the
+three-arm experiment that converts "raw run -> training data". It does three things, and getting
+any of them wrong quietly makes everything downstream meaningless:
 
-1. **解析核验结果**（:func:`parse_verify`）。编译器学的分岔条件几乎全都读 ``verify_status``：
-   核验过了就提交、没过就回去修。把 ``INCONCLUSIVE`` 读成 ``FAIL``、把崩溃读成「答案错」、
-   把 ``counterexample`` 的反极性拉平成 ``ok = (rc == 0)``——机器都会照着学出一条错的边，
-   而且**跑起来毫无异常**：它只是在错误的时候修、在该修的时候提交。
-2. **维护变量快照**（:func:`to_trace`）。每条记录的 ``vars`` 是编译器拟合条件用的样本点。
-   变量的更新规则就是这批训练数据的生成规则，所以逐条写在下面的「变量表」里。
-3. **落盘与读回**（:func:`write_jsonl` / :func:`read_jsonl`）。
+1. **Parse check results** (:func:`parse_verify`). Almost every branch condition the compiler
+   learns reads ``verify_status``: submit if the check passed, go back and repair if it did not.
+   Reading ``INCONCLUSIVE`` as ``FAIL``, a crash as "wrong answer", or flattening the inverted
+   polarity of ``counterexample`` into ``ok = (rc == 0)`` -- in each case the machine learns a
+   wrong edge from it, and **runs without any visible anomaly**: it simply repairs at the wrong
+   time and submits when it should repair.
+2. **Maintain variable snapshots** (:func:`to_trace`). Each record's ``vars`` is a sample point
+   the compiler fits conditions on. The variable update rules are the generating rules of this
+   training data, so they are spelled out one by one in the "variable table" below.
+3. **Write to and read back from disk** (:func:`write_jsonl` / :func:`read_jsonl`).
 
-跨臂可比性是硬约束
-------------------
-三臂比较的前提是同一件事在三臂里叫同一个名字。所以：
+Cross-arm comparability is a hard constraint
+--------------------------------------------
+Comparing the three arms presumes that the same thing has the same name in all three arms. So:
 
-* 工具名一律过 :func:`~hexis.traces.normalize.canon_tool_name`——``scripts/math_verify.py``、
-  ``math-verify``、``MATH_VERIFY`` 折成同一个 ``math_verify``；
-* 最终提交那一步在**每一条臂**里都叫 ``submit_answer``（:data:`SUBMIT_TOOL`）。P1 那条禁止项
-  是 ``require_before: submit_answer 之前必须先跑过核验``，被守卫的动作名一旦在某条臂里叫别的，
-  这条臂的违规率就恒为 0——不是因为它守规矩，而是因为检查根本没开火。
+* every tool name goes through :func:`~hexis.traces.normalize.canon_tool_name` --
+  ``scripts/math_verify.py``, ``math-verify`` and ``MATH_VERIFY`` fold into the same
+  ``math_verify``;
+* the final submit step is called ``submit_answer`` (:data:`SUBMIT_TOOL`) in **every arm**. The P1
+  prohibition is ``require_before: a check must have run before submit_answer``; once the guarded
+  action is named differently in some arm, that arm's violation rate is always 0 -- not because it
+  follows the rules, but because the check never fired.
 
-这两条由 :func:`check_canonical` 在 :func:`to_trace` 结束时逐条校验，不合就抛
-:class:`TraceAdapterError`，绝不让一条命名不齐的轨迹悄悄进数据集。
+Both are checked one by one by :func:`check_canonical` at the end of :func:`to_trace`; a mismatch
+raises :class:`TraceAdapterError`, so a trace with inconsistent naming never quietly enters the
+dataset.
 
-变量表（``Record.vars`` 里每条记录都带全，初值见括号）
---------------------------------------------------
+Variable table (every record carries all of them in ``Record.vars``; initial values in parentheses)
+-----------------------------------------------------------------------------------------------------
 ============== ================================================================
-变量            更新规则
+variable        update rule
 ============== ================================================================
-``repair_count`` （0）**一次核验开始执行时**，若上一次核验的 ``verify_status`` 既非空
-                 也非 ``PASS``，则先 +1。即「在一次没过的核验之后又核验了一次」= 修了
-                 一轮。第一次核验永远不 +1（它前面没有失败）。
-``verify_status``（``""``）最近一次核验的状态，取自 :func:`parse_verify`：
-                 ``PASS``/``FAIL``/``INCONCLUSIVE``/``ERROR``/``TIMEOUT``。``""`` = 还没核验过。
-``verify_exit``  （-1）最近一次核验的进程退出码。-1 是哨兵（还没核验过），真实退出码 ≥ 0，
-                 沙箱的超时/启动失败用负码（见 sandbox.TIMEOUT_RC/ERROR_RC）。
-``verify_stdout``（``""``）最近一次核验的 stdout，截到 :data:`VERIFY_STDOUT_MAX` 字符。
-                 截断是必要的：vars 逐条记录快照，不截断等于把同一段 stdout 抄十几遍。
-                 状态行在第一行，截断不会伤到要读的那部分。
-``candidate``    （``""``）当前摆在桌面上的候选答案。任何带答案参数的步骤都会更新它
-                 （核验步、提交步都算）。**这一条比规格多走了一步**：只在提交时才填的话，
-                 提交之前每条记录的 candidate 都是空串，编译器就拟合不出「已有候选答案 ⇒
-                 该去核验」这条边——而这正是数学技能的主循环。
-``answer``       （``""``）**只**由提交步写入的最终答案。它与 ``candidate`` 分开，是为了让
-                 「提交了」这件事在变量上留下痕迹。
+``repair_count`` (0) **when a check starts executing**, if the previous check's ``verify_status``
+                 is neither empty nor ``PASS``, first add 1. I.e. "checked again after a check
+                 that did not pass" = one round of repair. The first check never adds 1 (there
+                 is no failure before it).
+``verify_status``(``""``) status of the most recent check, taken from :func:`parse_verify`:
+                 ``PASS``/``FAIL``/``INCONCLUSIVE``/``ERROR``/``TIMEOUT``. ``""`` = not checked yet.
+``verify_exit``  (-1) process exit code of the most recent check. -1 is a sentinel (not checked
+                 yet); real exit codes are >= 0, and the sandbox's timeout/spawn failure use
+                 negative codes (see :data:`TIMEOUT_RC`/:data:`ERROR_RC`).
+``verify_stdout``(``""``) stdout of the most recent check, clipped to :data:`VERIFY_STDOUT_MAX`
+                 characters. Clipping is necessary: vars records a snapshot per record, and not
+                 clipping means copying the same stdout a dozen times. The status line is on the
+                 first line, so clipping does not hurt the part that needs to be read.
+``candidate``    (``""``) the candidate answer currently on the table. Every step with an answer
+                 argument updates it (check steps and submit steps both count). **This goes one
+                 step beyond the spec**: if it were filled only on submit, every record before
+                 the submit would have an empty candidate, and the compiler could not fit the
+                 edge "a candidate answer exists => go check it" -- which is exactly the main loop
+                 of the math skill.
+``answer``       (``""``) the final answer, written **only** by the submit step. It is kept apart
+                 from ``candidate`` so that "a submit happened" leaves a trace in the variables.
 ============== ================================================================
 
-刻意不做的事
-------------
-**不把任务输入铺进 ``vars``。** ``runtime.run_task`` 会做 ``values = dict(task["input"])``，
-在玩具技能上无害；但 MATH-500 的任务字典里**带着参考答案**。铺进去，参考答案就出现在每一条
-记录的变量快照里，编译器完全可能拟合出一条读金标准的分岔条件——机器于是「学会」了看答案，
-三臂比较立刻作废。任务输入照常写进轨迹头部（复现要用），但不进变量。
+Deliberately not done
+---------------------
+**The task input is not spread into ``vars``.** ``runtime.run_task`` does
+``values = dict(task["input"])``, which is harmless on toy skills; but MATH-500 task dicts **carry
+the reference answer**. Spreading it in would put the reference answer into the variable snapshot
+of every record, and the compiler could well fit a branch condition that reads the gold standard
+-- the machine would then have "learned" to look at the answer, and the three-arm comparison would
+be void immediately. The task input is still written into the trace header (needed for
+reproduction), but not into the variables.
 
-代码正文离线存放
-----------------
-模型现写的 python（``run_python`` 的 ``code`` 参数）不留在记录里：记录只留
-``code_sha256`` 与 ``code_path``，正文写成 ``artifacts/<sha256>.py``。给了 ``artifacts_dir``
-就当场落盘；没给就先寄存在 ``Record.meta`` 里（``meta`` 不参与规范化、不参与评判），由
-:func:`write_jsonl` 落盘时一并搬出去——两条路径写出的 JSONL 逐字相同，且**评判永远在搬完
-之后做**，所以从 JSONL 读回来重判一定得到同一个 verdict。
+Code bodies are stored offline
+------------------------------
+Python written on the fly by the model (the ``code`` argument of ``run_python``) is not kept in
+the record: the record keeps only ``code_sha256`` and ``code_path``, and the body is written to
+``artifacts/<sha256>.py``. If ``artifacts_dir`` is given it is written to disk immediately;
+otherwise it is parked in ``Record.meta`` first (``meta`` takes no part in normalization or
+judging) and moved out by :func:`write_jsonl` when writing to disk -- both paths produce
+byte-identical JSONL, and **judging always happens after the move**, so re-judging a trace read
+back from JSONL always yields the same verdict.
 """
 
 from __future__ import annotations
@@ -72,14 +89,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
+from hexis.machine.schema import FALLBACK, Prohibition, Record, Trace
 from hexis.traces import judge as _judge
 from hexis.traces import phases as _phases
 from hexis.traces.normalize import BEGIN_TOOL, canon_action, canon_tool_name, is_begin
 
-from hexis.machine.schema import FALLBACK, Prohibition, Record, Trace
-
-#: 超时被杀 / 根本没起来，用两个不会与真实退出码撞车的返回码区分开。
-#: 旧 harness 两种都记 -1，于是「跑挂了」和「跑超时了」在下游长得一模一样。
+#: Killed by timeout / never started: two return codes that cannot collide with real exit codes
+#: keep them apart. The old harness recorded -1 for both, so "crashed" and "timed out" looked
+#: exactly the same downstream.
 TIMEOUT_RC = -100
 ERROR_RC = -101
 
@@ -96,11 +113,11 @@ __all__ = [
 
 
 class TraceAdapterError(RuntimeError):
-    """轨迹转换里**不能容忍**的错误：命名不齐、步号不连续。宁可炸也不要脏数据。"""
+    """Errors in trace conversion that **cannot be tolerated**: inconsistent naming, non-consecutive step numbers. Better to fail loudly than to produce dirty data."""
 
 
 # --------------------------------------------------------------------------- #
-# 常量
+# Constants
 # --------------------------------------------------------------------------- #
 PASS = "PASS"
 FAIL = "FAIL"
@@ -108,66 +125,72 @@ INCONCLUSIVE = "INCONCLUSIVE"
 ERROR = "ERROR"
 TIMEOUT = "TIMEOUT"
 
-#: 五种状态的全集。前三种是工具**自己**报的，后两种是本模块对「没有可信裁决」的分类。
+#: All five statuses. The first three are reported by the tool **itself**; the last two are this
+#: module's classification of "no trustworthy ruling".
 STATUSES = (PASS, FAIL, INCONCLUSIVE, ERROR, TIMEOUT)
 
-#: ``math_verify.py`` 的全部子命令（逐字取自 vendored 脚本的 ``build_parser``）。
+#: All subcommands of ``math_verify.py`` (taken verbatim from the vendored script's ``build_parser``).
 VERIFY_SUBCOMMANDS = frozenset({
     "equiv", "derivative", "antiderivative", "definite-integral", "substitute",
     "satisfies", "limit", "solve", "system", "counterexample",
 })
 
-#: 极性**相反**的子命令：它要找的就是反例，找到了才算「搜索成功」。见 :func:`parse_verify`。
+#: Subcommands with **inverted** polarity: what they look for is a counterexample, and only finding
+#: one counts as "search succeeded". See :func:`parse_verify`.
 INVERTED_SUBCOMMANDS = frozenset({"counterexample"})
 
-#: 算「核验代码跑过了」的工具（规范名）。``run_python``/``run_script`` 与技能自带的
-#: ``math_verify`` 同等对待——标定实测模型用 ``run_python`` 比用 ``math_verify.py`` 更频繁，
-#: 只认后者会把真的核验过的运行误判成违规（docs/HARNESS_CALIBRATION.md 第 4 节第 2 条）。
+#: Tools (canonical names) that count as "check code was run". ``run_python``/``run_script`` are
+#: treated the same as the skill's own ``math_verify`` -- in calibration runs models used
+#: ``run_python`` more often than ``math_verify.py``, and recognising only the latter would
+#: misjudge runs that really did check as violations.
 VERIFY_TOOLS = frozenset({"math_verify", "run_python", "run_script"})
 
-#: 最终提交那一步的**唯一**规范名。
+#: The **only** canonical name of the final submit step.
 SUBMIT_TOOL = "submit_answer"
 
-#: 折叠后会被改写成 :data:`SUBMIT_TOOL` 的别名。模型嘴里的提交动作五花八门，跨臂对不齐
-#: 就等于关掉 P1 检查，所以在这里一次性收口。``done``/``finish`` 这类**不**收——它们是
-#: 「结束」不是「交答案」，混进来会把一次弃权当成一次提交。
+#: Aliases rewritten to :data:`SUBMIT_TOOL` after folding. Models name the submit action in all
+#: sorts of ways, and failing to align them across arms amounts to switching off the P1 check, so
+#: they are funnelled into one name here. ``done``/``finish`` and the like are **not** included --
+#: they mean "end", not "hand in the answer", and mixing them in would count an abstention as a
+#: submission.
 SUBMIT_ALIASES = frozenset({
     "submit_answer", "submit", "submit_final_answer", "final_answer",
     "finalize_answer", "give_answer", "answer",
 })
 
-#: 步骤参数里可能装着答案的键，按优先级。
+#: Keys in step arguments that may hold the answer, in priority order.
 ANSWER_ARG_KEYS = ("answer", "final_answer", "candidate", "result", "value")
 
-#: 参数里装着「代码正文」的键：这些值搬去 ``artifacts/``，记录只留哈希。
+#: Argument keys holding a "code body": these values move to ``artifacts/`` and the record keeps only the hash.
 CODE_KEYS = ("code", "script", "source")
 
-#: 离线正文的目录名（相对轨迹目录）。
+#: Directory name for offline bodies (relative to the trace directory).
 ARTIFACTS_DIRNAME = "artifacts"
 
 VERIFY_STDOUT_MAX = 400
 TOOL_STDOUT_MAX = 2000
 REPLY_MAX = 4000
 
-#: 墙钟守卫在各平台留下的退出码：124（coreutils ``timeout``）、137/-9（SIGKILL）、
-#: 143/-15（SIGTERM）、以及本仓库沙箱的 :data:`~hexis.legacy.sandbox.TIMEOUT_RC`。
+#: Exit codes left by wall-clock guards on various platforms: 124 (coreutils ``timeout``),
+#: 137/-9 (SIGKILL), 143/-15 (SIGTERM), and this repository's sandbox :data:`TIMEOUT_RC`.
 _TIMEOUT_RCS = frozenset({124, 137, 143, -9, -15, TIMEOUT_RC})
 
 _STATUS_LINE_RE = re.compile(r"^\s*status\s*:\s*([A-Za-z_]+)\s*$")
 
 
 # --------------------------------------------------------------------------- #
-# 原始运行
+# Raw runs
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class RawStep:
-    """agent 循环里的一步，**未加工**。
+    """One step of the agent loop, **unprocessed**.
 
-    ``kind`` 四选一：``model``（一次模型回复）/ ``tool``（一次工具调用）/ ``judge``
-    （一次语义判断）/ ``end``（停机）。``text`` 是已经剥掉 ``<think>`` 的模型正文——
-    端点把推理块一律内联在 ``content`` 里（docs/HARNESS_CALIBRATION.md 第 2 节），不剥
-    就会把草稿当答案。``meta`` 装 token 数、耗时、模型 id 这类执行侧账；``meta["state"]``
-    可以覆盖记录的状态名，``meta["timed_out"]`` 告诉解析器这次是被墙钟杀掉的。
+    ``kind`` is one of four: ``model`` (one model reply) / ``tool`` (one tool call) / ``judge``
+    (one semantic judgement) / ``end`` (halt). ``text`` is the model body with ``<think>`` already
+    stripped -- endpoints always inline the reasoning block in ``content``, and without stripping
+    it the draft would be taken for the answer. ``meta`` holds execution-side accounting such as
+    token counts, durations and model id; ``meta["state"]`` can override the record's state name,
+    and ``meta["timed_out"]`` tells the parser this run was killed by the wall clock.
     """
 
     kind: str
@@ -182,7 +205,7 @@ class RawStep:
 
 @dataclass(frozen=True)
 class RawRun:
-    """一次完整运行：任务、步骤序列，加上「谁跑的」这组出身字段。"""
+    """One complete run: the task, the step sequence, plus the provenance fields saying "who ran it"."""
 
     task: dict
     steps: list[RawStep]
@@ -193,15 +216,17 @@ class RawRun:
 
 
 # --------------------------------------------------------------------------- #
-# 核验输出解析
+# Parsing check output
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
 class VerifyOutcome:
-    """一次核验的裁决。
+    """The ruling of one check.
 
-    ``status`` 是**工具报的原始状态**（或本模块给出的 ``ERROR``/``TIMEOUT``），它是编译器
-    拟合条件时读的那个值。``ok`` 是**带子命令语义的读法**，两者在 ``counterexample`` 上
-    故意不一致，理由见 :func:`parse_verify`。``detail`` 是审计用的旁证，不进变量。
+    ``status`` is **the raw status reported by the tool** (or ``ERROR``/``TIMEOUT`` assigned by this
+    module); it is the value the compiler reads when fitting conditions. ``ok`` is **the reading
+    with subcommand semantics**; the two deliberately disagree on ``counterexample``, for the
+    reasons given in :func:`parse_verify`. ``detail`` is supporting evidence for auditing and does
+    not enter the variables.
     """
 
     status: str
@@ -210,40 +235,47 @@ class VerifyOutcome:
 
     @property
     def passed(self) -> bool:
-        """状态就是 ``PASS``（不看子命令极性）。想问「答案对不对」用这个。"""
+        """The status is exactly ``PASS`` (ignoring subcommand polarity). Use this to ask "is the answer right"."""
         return self.status == PASS
 
 
 def parse_verify(stdout: str, returncode: Optional[int], *,
                  argv: Sequence[str] = (),
                  timed_out: Optional[bool] = None) -> VerifyOutcome:
-    """把核验工具的一次输出读成 :class:`VerifyOutcome`。
+    """Read one output of the check tool into a :class:`VerifyOutcome`.
 
-    规则全部来自对 vendored ``scripts/math_verify.py`` 的实测（见
-    ``tests/test_17_verify_parse.py`` 里从 ``run_validation_suite.py`` 抬过来的用例表）：
+    All rules come from measurements against the vendored ``scripts/math_verify.py`` and the
+    cases of its validation suite:
 
-    * ``--json`` 模式：stdout 是一个 JSON 对象，键按字母序回来（脚本用 ``sort_keys=True``），
-      读 ``["status"]``；
-    * 普通模式：stdout 的**第一行**恒为 ``status: PASS|FAIL|INCONCLUSIVE``；
-    * **退出码 0 ⟺ ``status: PASS``；``FAIL`` 与 ``INCONCLUSIVE`` 都退 1**。所以单看退出码
-      永远分不开「答案错」和「工具没结论」，更分不开「答案错」和「工具崩了」——三者都是 1。
-      因此本函数**先要一个 ``status``**，要不到就判 ``ERROR``；
-    * 空 stdout + stderr 上的 traceback + rc 1 ⇒ ``ERROR``（喂 LaTeX 就是这个形状）；
-    * rc 2（argparse 用法错，例如 ``--json`` 放到了子命令后面）⇒ ``ERROR``；
-    * rc 124 / 被墙钟守卫杀掉 ⇒ ``TIMEOUT``（``equiv "9^9^9" "1"`` 永不返回，靠这条兜住）；
-    * ``rc not in {0, 1}`` 一律 ``ERROR``：退出码越界说明这不是核验协议的输出，此时哪怕
-      stdout 里真有一行 ``status:`` 也不该信。
+    * ``--json`` mode: stdout is one JSON object whose keys come back in alphabetical order (the
+      script uses ``sort_keys=True``); read ``["status"]``;
+    * plain mode: the **first line** of stdout is always ``status: PASS|FAIL|INCONCLUSIVE``;
+    * **exit code 0 <=> ``status: PASS``; ``FAIL`` and ``INCONCLUSIVE`` both exit with 1**. So the
+      exit code alone can never distinguish "wrong answer" from "tool reached no conclusion", let
+      alone "wrong answer" from "tool crashed" -- all three are 1. Hence this function **first
+      requires a ``status``**, and judges ``ERROR`` if there is none;
+    * empty stdout + a traceback on stderr + rc 1 => ``ERROR`` (feeding it LaTeX gives this shape);
+    * rc 2 (argparse usage error, e.g. ``--json`` placed after the subcommand) => ``ERROR``;
+    * rc 124 / killed by the wall-clock guard => ``TIMEOUT`` (``equiv "9^9^9" "1"`` never returns;
+      this rule catches it);
+    * ``rc not in {0, 1}`` is always ``ERROR``: an out-of-range exit code means this is not output
+      of the check protocol, and even if stdout really contains a ``status:`` line it should not
+      be trusted.
 
-    **``counterexample`` 的极性是反的。** 它的活儿是「找一个反例」：``status: PASS`` 表示
-    「等式被符号地证明了，因此不存在反例」（搜索一无所获），``status: FAIL`` 表示**找到了
-    见证点**（搜索成功，claim 是假的）。所以 ``ok`` 在这个子命令上等于 ``status == FAIL``。
-    ``ok`` 读作「这次调用拿到了它要找的那个肯定答案」，**不是**「答案对」——想问后者请读
-    ``status`` 或 :attr:`VerifyOutcome.passed`。:func:`to_trace` 维护的 ``verify_status``
-    走的正是 ``status``，所以这处反转不会污染修复循环。
+    **``counterexample`` has inverted polarity.** Its job is "find a counterexample":
+    ``status: PASS`` means "the equality was proven symbolically, so no counterexample exists"
+    (the search found nothing), and ``status: FAIL`` means **a witness was found** (the search
+    succeeded, the claim is false). So on this subcommand ``ok`` equals ``status == FAIL``. ``ok``
+    reads as "this call got the affirmative answer it was looking for", **not** "the answer is
+    right" -- for the latter read ``status`` or :attr:`VerifyOutcome.passed`. The
+    ``verify_status`` maintained by :func:`to_trace` uses ``status``, so this inversion does not
+    contaminate the repair loop.
 
-    找到状态行时**信状态行**，即使它与退出码不符（``detail["exit_agrees"]`` 如实记下这件事）：
-    模型自己写的核验脚本完全可能 ``print("status: FAIL")`` 之后正常退出，把它判成 ERROR 等于
-    把一个读得懂的裁决扔掉。真正不可信的情况（rc 越界、没有状态行）已经在前面拦掉了。
+    When a status line is found, **the status line is trusted** even if it disagrees with the exit
+    code (``detail["exit_agrees"]`` records this faithfully): a check script written by the model
+    may well ``print("status: FAIL")`` and then exit normally, and judging that as ERROR would
+    throw away a readable ruling. The genuinely untrustworthy cases (rc out of range, no status
+    line) have already been filtered out above.
     """
     text = stdout or ""
     rc = returncode
@@ -261,7 +293,7 @@ def parse_verify(stdout: str, returncode: Optional[int], *,
         detail["status_line"] = line_no
         detail["status_first_line"] = (line_no == 0)
 
-    # ---- 先判「根本没拿到可信裁决」的几种 ---- #
+    # ---- first, the cases where no trustworthy ruling was obtained at all ---- #
     if timed_out or (isinstance(rc, int) and rc in _TIMEOUT_RCS):
         detail["reason"] = "timeout"
         return VerifyOutcome(TIMEOUT, False, detail)
@@ -280,7 +312,7 @@ def parse_verify(stdout: str, returncode: Optional[int], *,
         detail["raw_status"] = label
         return VerifyOutcome(ERROR, False, detail)
 
-    # ---- 有裁决 ---- #
+    # ---- there is a ruling ---- #
     detail["exit_agrees"] = ((rc == 0) == (label == PASS))
     if inverted:
         detail["witness_found"] = (label == FAIL)
@@ -291,9 +323,10 @@ def parse_verify(stdout: str, returncode: Optional[int], *,
 
 
 def _subcommand_of(argv: Sequence[str]) -> str:
-    """从 argv 里认出 ``math_verify.py`` 的子命令，认不出返回空串。
+    """Recognise the ``math_verify.py`` subcommand in argv; empty string if none is recognised.
 
-    只认白名单里的词，因此不会把 ``--var``、脚本路径、或者某个恰好同名的参数值当成子命令。
+    Only words from the allow-list are recognised, so ``--var``, the script path, or an argument
+    value that happens to share a name are never taken for a subcommand.
     """
     for tok in argv or ():
         s = str(tok)
@@ -303,13 +336,16 @@ def _subcommand_of(argv: Sequence[str]) -> str:
 
 
 def _read_status(text: str) -> tuple[Optional[str], str, Optional[int], Optional[dict]]:
-    """从 stdout 里取状态：返回 ``(状态标签, 模式, 行号, JSON载荷)``。
+    """Take the status from stdout: returns ``(status label, mode, line number, JSON payload)``.
 
-    先试 JSON（``--json`` 模式，整份 stdout 是一个对象）；再逐行找**整行**形如
-    ``status: XXX`` 的那一行。找不到返回 ``(None, ...)``——调用方据此判 ERROR。
+    First tries JSON (``--json`` mode, the whole stdout is one object); then looks line by line for
+    a line that **as a whole** has the form ``status: XXX``. If none is found returns
+    ``(None, ...)`` -- the caller judges ERROR from that.
 
-    普通模式下状态恒在第一行，但这里仍然扫完全部行并记下行号：模型自己写的核验脚本可能
-    先打印两句别的。要求「整行匹配」把 ``note: ... status: ...`` 这种正文里的字样挡在外面。
+    In plain mode the status is always on the first line, but all lines are still scanned and the
+    line number recorded: a check script written by the model may print a couple of other things
+    first. Requiring a whole-line match keeps wording like ``note: ... status: ...`` in body text
+    out.
     """
     stripped = (text or "").strip()
     if stripped.startswith("{"):
@@ -329,10 +365,10 @@ def _read_status(text: str) -> tuple[Optional[str], str, Optional[int], Optional
 
 
 # --------------------------------------------------------------------------- #
-# 变量
+# Variables
 # --------------------------------------------------------------------------- #
 def initial_vars() -> dict:
-    """一次运行开始时的变量快照。初值的含义见模块文档的「变量表」。"""
+    """The variable snapshot at the start of a run. See the "variable table" in the module docs for what the initial values mean."""
     return {
         "repair_count": 0,
         "verify_status": "",
@@ -343,11 +379,13 @@ def initial_vars() -> dict:
     }
 
 
-#: **模型侧**变量：臂一臂二只暴露工具调用，模型脑内的东西（它上一句说了什么、上一步调了
-#: 什么工具、成没成）在轨迹里原本没有快照。从文档引入的判断动作要读的正是这类东西——没有
-#: 快照，``fit.calibrate`` 就没有样本可标定。所以每条记录的 ``vars`` 多记这三个；它们不在
-#: :func:`initial_vars` 里（那是被 MathTask 奇偶测试钉住的工具侧变量表），也不会被编译器
-#: 当成机器变量——除非某个判断动作声明读它。
+#: **Model-side** variables: arms one and two expose only tool calls, so what is in the model's head
+#: (what it said last, which tool it called last, whether that succeeded) originally has no
+#: snapshot in the trace. Judge actions introduced from the document need to read exactly these --
+#: without a snapshot, ``fit.calibrate`` has no samples to calibrate on. So each record's ``vars``
+#: additionally records these three; they are not in :func:`initial_vars` (that is the fixed
+#: tool-side variable table), and the compiler does not treat them as machine variables -- unless
+#: some judge action declares that it reads them.
 MODEL_VARS = ("last_reply", "last_tool", "last_tool_ok")
 
 
@@ -356,14 +394,15 @@ def model_vars() -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 开局工具：编译期的轨迹视图
+# Begin tool: the compile-time view of a trace
 # --------------------------------------------------------------------------- #
 def with_begin(trace: Trace) -> Trace:
-    """在轨迹最前面垫一条 :data:`~hexis.traces.normalize.BEGIN_TOOL` 记录（step = 首条 -1，
-    通常是 0）。幂等：已经垫过的原样返回。**不写回磁盘**——这是编译器与回放看的视图，
-    采集下来的轨迹一个字节不动（test_17 钉着 ``records[0]`` 是第一条真实的工具步）。
+    """Prepend a :data:`~hexis.traces.normalize.BEGIN_TOOL` record to the trace (step = first - 1,
+    usually 0). Idempotent: an already-prepended trace is returned as is. **Not written back to
+    disk** -- this is the view the compiler and replay look at; the collected trace is left
+    byte-for-byte untouched (``records[0]`` there stays the first real tool step).
 
-    ``error_step`` 不用平移：真实记录的 step 号照旧。
+    ``error_step`` needs no shift: real records keep their step numbers.
     """
     recs = list(trace.records or ())
     if recs and is_begin(recs[0].action):
@@ -378,12 +417,14 @@ def with_begin(trace: Trace) -> Trace:
 
 
 def with_input(trace: Trace, keys: Sequence[str]) -> Trace:
-    """把任务字典顶层的 ``keys`` 镜像进 ``task["input"]``（编译视图，不写回磁盘）。
+    """Mirror the top-level ``keys`` of the task dict into ``task["input"]`` (compile view, not written back to disk).
 
-    旧轨迹（collect.py 采的那 80 条）头部只有 ``task_id/problem/answer_ref/…``，没有
-    ``input``——于是 ``problem`` 不是可声明的变量，从文档引入的判断动作读不到题面。参考答案
-    （``answer_ref``/``answer``）**永远不镜像**：``run_task`` 把 ``task["input"]`` 摊进变量表，
-    金标进了变量就可能被学成一条读答案的条件（test_17 钉着这条）。幂等。
+    Older traces have only ``task_id/problem/answer_ref/…`` in their header and no ``input`` -- so
+    ``problem`` is not a declarable variable, and judge actions introduced from the document cannot
+    read the problem statement. Reference answers (``answer_ref``/``answer``) are **never
+    mirrored**: ``run_task`` spreads ``task["input"]`` into the variable table, and once the gold
+    answer is in the variables it could be learned as a condition that reads the answer.
+    Idempotent.
     """
     task = trace.task if isinstance(trace.task, dict) else {}
     inp = dict(task.get("input") or {}) if isinstance(task.get("input"), dict) else {}
@@ -400,16 +441,18 @@ def with_input(trace: Trace, keys: Sequence[str]) -> Trace:
 
 
 # --------------------------------------------------------------------------- #
-# 程序打标器：给从文档引入的判断动作打金标
+# Programmatic labelers: gold labels for judge actions introduced from the document
 # --------------------------------------------------------------------------- #
-#: ``gold_from`` 名 → ``(trace, i) -> label | None``。``i`` 是该判断在轨迹里**之前**的那条
-#: 记录的下标（零宽判断不消费记录）。打标器是纯函数、像禁止项一样受审查；**模型永不产
-#: 金标**。回放（replay.walk）与标定（fit.calibrate 的样本）用同一张表，两边构造上一致。
+#: ``gold_from`` name -> ``(trace, i) -> label | None``. ``i`` is the index of the record
+#: **before** the judge in the trace (a zero-width judge consumes no record). Labelers are pure
+#: functions, reviewed like prohibitions; **a model never produces gold labels**. Replay
+#: (replay.walk) and calibration (the samples of fit.calibrate) use the same table, so the two
+#: sides agree by construction.
 LABELERS: dict[str, Callable[[Trace, int], Optional[str]]] = {}
 
 
 def register_labeler(name: str) -> Callable:
-    """装饰器：把一个 ``(trace, i) -> label | None`` 登记成打标器。"""
+    """Decorator: register a ``(trace, i) -> label | None`` function as a labeler."""
     def deco(fn: Callable[[Trace, int], Optional[str]]):
         LABELERS[name] = fn
         return fn
@@ -417,7 +460,7 @@ def register_labeler(name: str) -> Callable:
 
 
 def _verify_records_after(trace: Trace, i: int) -> list:
-    """``i`` 之后的核验记录。判断动作的程序打标要看它们的结果。"""
+    """Check records after ``i``. Programmatic labeling of judge actions looks at their results."""
     return [r for r in trace.records[i + 1:]
             if (r.action or {}).get("kind") == "tool"
             and (r.action or {}).get("name") in VERIFY_TOOLS]
@@ -425,38 +468,44 @@ def _verify_records_after(trace: Trace, i: int) -> list:
 
 @register_labeler("next_action")
 def next_action_label(trace: Trace, i: int) -> Optional[str]:
-    """下一步的**动作标签**：``tool:bash/apply`` / ``model`` / ``judge`` / ``end:done``。
+    """The **action label** of the next step: ``tool:bash/apply`` / ``model`` / ``judge`` / ``end:done``.
 
-    这是「先分开、合并要验」那条路的基石打标器（见 :mod:`hexis.merge`）。分岔处插的判断
-    动作，它的金标就是「轨迹接下来那一步是什么」——由程序从轨迹里现读，模型永不产金标。
-    有了它，分岔的出边条件一律是 ``v == '<标签>'``，两两互斥、由构造成立，等同性因此可证。
+    This is the cornerstone labeler of the "split first, merges must be verified" approach. For a
+    judge action inserted at a branch point, its gold label is "what the trace does next" -- read
+    directly from the trace by a program; a model never produces gold labels. With it, the
+    outgoing conditions of a branch are all ``v == '<label>'``, pairwise exclusive by construction,
+    so equivalence can be proven.
 
-    ``i`` 按打标器的统一约定，是这个判断**之前**那条记录的下标；要标的是 ``i + 1``。
+    Following the labelers' common convention, ``i`` is the index of the record **before** this
+    judge; the step to label is ``i + 1``.
     """
     recs = list(trace.records or ())
     j = i + 1
     if j < 0 or j >= len(recs):
         return None
-    return branch_label(recs[j])          # 传**记录**：裸 action 看不到 output，writes 会算空，指纹跟建树那侧对不上
+    return branch_label(recs[j])          # pass the **record**: a bare action has no output, writes would come out empty, and the fingerprint would not match the tree-building side
 
 
 def branch_key(rec_or_action: Any) -> tuple:
-    """一步的身份键，**不含提示词与提问**。
+    """The identity key of a step, **without prompt or question text**.
 
-    规范化的严格档会把模型步的提示词与判断步的提问算进键。那两段文字来自产出这条轨迹的那台
-    机器，同一个步骤在不同机器版本下因此拿到不同的键。身份不该依赖产出轨迹的那一方，所以在
-    这里去掉。剩下的分量是动作类别、工具名、阶段与写出的变量，它们都是这一步自身的属性。
+    The strict mode of normalization includes a model step's prompt and a judge step's question in
+    the key. Those two pieces of text come from the machine that produced the trace, so the same
+    step gets different keys under different machine versions. Identity should not depend on
+    whoever produced the trace, so they are removed here. The remaining components are the action
+    kind, tool name, phase and written variables, all properties of the step itself.
     """
     key = canon_action(rec_or_action, strict=True)
     return tuple(x for x in key if not (x.startswith("prompt=") or x.startswith("question=")))
 
 
 def branch_label(rec_or_action: Any) -> str:
-    """一步的分支标签，由 :func:`branch_key` 直接翻成可读形式。
+    """The branch label of a step, translated directly from :func:`branch_key` into readable form.
 
-    标签要满足三条。它只依赖这一步本身，因为读标签的程序只看得到轨迹。它对不同的键给出不同
-    的值，否则两个后继共用一个标签，其中一个成为死代码。它要能被模型读懂，因为运行时由模型
-    在这些标签里选一个。
+    A label must satisfy three conditions. It depends only on the step itself, because the program
+    reading the label only sees the trace. It gives different values for different keys, otherwise
+    two successors share a label and one of them becomes dead code. It must be understandable by a
+    model, because at run time the model picks one of these labels.
     """
     key = branch_key(rec_or_action)
     parts = {k.split("=", 1)[0]: k.split("=", 1)[1] for k in key[1:] if "=" in k}
@@ -472,8 +521,10 @@ def branch_label(rec_or_action: Any) -> str:
 
 @register_labeler("next_action_after")
 def next_action_after(trace: Trace, i: int) -> Optional[str]:
-    """``i`` 之后的第一步是哪一类动作（:func:`branch_label`）——「文档说这时该判一下」的
-    判断最通用的程序金标：金标是轨迹自己的未来，不看参考答案。``i`` 之后没有记录 ⇒ ``None``。
+    """Which kind of action is the first step after ``i`` (:func:`branch_label`) -- the most general
+    programmatic gold label for a judge of the "the document says to judge here" kind: the gold
+    label is the trace's own future, and the reference answer is never consulted. No record after
+    ``i`` => ``None``.
     """
     recs = trace.records
     if i + 1 >= len(recs) or i < -1:
@@ -483,13 +534,16 @@ def next_action_after(trace: Trace, i: int) -> Optional[str]:
 
 @register_labeler("fail_attr_from_trace")
 def fail_attr_from_trace(trace: Trace, i: int) -> Optional[str]:
-    """核验 FAIL 之后的失败归因（参考机结构④的两个标签），从**之后发生的事**倒推：
+    """Failure attribution after a check FAIL (the two failure-attribution labels), inferred backwards from **what happened afterwards**:
 
-    * 下一次核验时 ``candidate`` 没变、结果却 PASS ⇒ 答案本来就对，是 **核验写错了**；
-    * 下一次核验时 ``candidate`` 变了 ⇒ 模型改了答案，是 **解答有错**；
-    * 没有下一次核验，或看不出 ⇒ ``None``（弃权）。
+    * at the next check ``candidate`` is unchanged but the result is PASS => the answer was right
+      all along, and the check itself was written wrong: label ``核验写错了``;
+    * at the next check ``candidate`` has changed => the model changed its answer, so the solution
+      was wrong: label ``解答有错``;
+    * no next check, or nothing can be told => ``None`` (abstain).
 
-    只在紧邻的前一条记录是 ``verify_status != PASS`` 的核验步时才有意义；否则 ``None``。
+    Only meaningful when the immediately preceding record is a check step with
+    ``verify_status != PASS``; otherwise ``None``.
     """
     recs = trace.records
     if i < 0 or i >= len(recs):
@@ -513,15 +567,15 @@ def fail_attr_from_trace(trace: Trace, i: int) -> Optional[str]:
 
 
 def _clip(text: str, limit: int) -> str:
-    """截断并**留下截断的痕迹**：省略号后面写清原长，免得日后把截断当成工具真的没输出。"""
+    """Clip and **leave a trace of the clipping**: the ellipsis is followed by the original length, so clipping is never later mistaken for the tool really having no output."""
     s = text or ""
     if len(s) <= limit:
         return s
-    return s[:limit] + f"…[截断，共 {len(s)} 字符]"
+    return s[:limit] + f"…[truncated, {len(s)} chars total]"
 
 
 def _first_answer(args: dict) -> Optional[str]:
-    """从一步的参数里取答案文本，取不到返回 None。"""
+    """Take the answer text from a step's arguments; None if there is none."""
     for key in ANSWER_ARG_KEYS:
         v = args.get(key)
         if isinstance(v, (str, int, float)) and str(v).strip():
@@ -530,16 +584,16 @@ def _first_answer(args: dict) -> Optional[str]:
 
 
 def _canon_step_name(raw_name: str) -> str:
-    """工具名的规范形：先过 :func:`canon_tool_name`，再把提交类别名收口到 ``submit_answer``。"""
+    """Canonical form of a tool name: first :func:`canon_tool_name`, then submit aliases are funnelled into ``submit_answer``."""
     name = canon_tool_name(raw_name)
     return SUBMIT_TOOL if name in SUBMIT_ALIASES else name
 
 
 # --------------------------------------------------------------------------- #
-# 代码正文离线存放
+# Offline storage of code bodies
 # --------------------------------------------------------------------------- #
 def _extract_code(inp: dict) -> tuple[dict, dict]:
-    """把参数里的代码正文换成哈希，返回 ``(新参数, {sha: 正文})``。"""
+    """Replace code bodies in the arguments with hashes; returns ``(new arguments, {sha: body})``."""
     out = dict(inp)
     bodies: dict[str, str] = {}
     for key in CODE_KEYS:
@@ -556,7 +610,7 @@ def _extract_code(inp: dict) -> tuple[dict, dict]:
 
 
 def _spill(bodies: dict, artifacts_dir: Any) -> None:
-    """把正文写成 ``<artifacts_dir>/<sha>.py``。同名即同内容（哈希即文件名），已存在就不重写。"""
+    """Write bodies as ``<artifacts_dir>/<sha>.py``. Same name means same content (the hash is the file name), so existing files are not rewritten."""
     if not bodies:
         return
     root = Path(artifacts_dir)
@@ -568,17 +622,19 @@ def _spill(bodies: dict, artifacts_dir: Any) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 单步转换
+# Converting a single step
 # --------------------------------------------------------------------------- #
 def _record_for(step: RawStep, idx: int, values: dict, *,
                 artifacts_dir: Any, phase_rules: str = "",
                 outputs: tuple = ()) -> tuple[Record, Optional[VerifyOutcome]]:
-    """把一个 :class:`RawStep` 折成一条 :class:`~hexis.machine.schema.Record`，顺带更新 ``values``。
+    """Fold one :class:`RawStep` into a :class:`~hexis.machine.schema.Record`, updating ``values`` along the way.
 
-    ``output`` 的键**就是这一步写入的变量名**：``normalize.action_writes`` 从 output 的键反推
-    writes（``ok``/``error`` 除外），编译器再据此给状态标 writes。所以核验步的 output 用的是
-    ``verify_status``/``verify_exit``/``verify_stdout`` 这组全名，而不是 ``status``——否则状态
-    声明写了 ``status``、条件却读 ``verify_status``，两边对不上。
+    The keys of ``output`` **are the names of the variables this step writes**:
+    ``normalize.action_writes`` infers writes from the output keys (except ``ok``/``error``), and
+    the compiler labels the state's writes from that. So a check step's output uses the full names
+    ``verify_status``/``verify_exit``/``verify_stdout`` rather than ``status`` -- otherwise the
+    state declaration would say ``status`` while the condition reads ``verify_status``, and the
+    two would not match.
     """
     kind = (step.kind or "").strip().lower()
     meta = dict(step.meta or {})
@@ -588,8 +644,9 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
     if kind == "tool":
         name = _canon_step_name(step.name)
         raw_args = dict(step.args or {})
-        # 阶段要在**抽走正文之前**判：_extract_code 之后记录里只剩 code_sha256，
-        # 拿哈希判不出这一步在干什么（见 hexis.traces.phases 的模块文档）。
+        # The phase must be classified **before the body is moved out**: after _extract_code the
+        # record only has code_sha256, and a hash cannot tell what this step is doing (see the
+        # module docs of hexis.traces.phases).
         phase = (_phases.classify(name, raw_args, phase_rules, outputs=outputs)
                  if phase_rules else "")
         inp, bodies = _extract_code(raw_args)
@@ -597,7 +654,7 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
             if artifacts_dir is not None:
                 _spill(bodies, artifacts_dir)
             else:
-                meta["code_bodies"] = dict(bodies)   # 由 write_jsonl 落盘时搬走
+                meta["code_bodies"] = dict(bodies)   # moved out by write_jsonl when writing to disk
         action = {"kind": "tool", "name": name, "input": inp}
         if phase:
             action["phase"] = phase
@@ -609,7 +666,7 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
         else:
             output = {"ok": (step.returncode in (None, 0)),
                       "stdout": _clip(step.stdout, TOOL_STDOUT_MAX)}
-            # 桌面上的候选答案：核验之外的工具也可能带着它（例如 solve 的 --expected）
+            # candidate answer on the table: tools other than checks may carry it too (e.g. solve's --expected)
             cand = _first_answer(inp)
             if cand is not None:
                 values["candidate"] = cand
@@ -617,12 +674,13 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
             meta.setdefault("returncode", step.returncode)
         if (step.stderr or "").strip():
             meta.setdefault("stderr", _clip(step.stderr, TOOL_STDOUT_MAX))
-        if "last_tool" in values:                # 只在 to_trace 开了模型侧快照时记
+        if "last_tool" in values:                # only recorded when to_trace enabled model-side snapshots
             values["last_tool"] = name
             values["last_tool_ok"] = bool(output.get("ok", step.returncode in (None, 0)))
     elif kind == "model":
-        # 模型正文进 output 而不是 meta：``absent``/``regex`` 这类文本禁止项只扫
-        # action + output（见 judge._record_text），藏进 meta 就等于永远查不到模型说了什么。
+        # The model body goes into output rather than meta: text prohibitions like
+        # ``absent``/``regex`` only scan action + output (see judge._record_text); hiding it in
+        # meta would mean never finding out what the model said.
         action = {"kind": "model"}
         output = {"reply": _clip(step.text or step.stdout, REPLY_MAX)}
         if "last_reply" in values:
@@ -641,14 +699,14 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
         action = {"kind": "end", "terminal": terminal}
         output = {}
     elif kind == "user":
-        # 用户输入：问了什么在 action.prompt，用户答了什么在 output.answer
+        # User input: what was asked is in action.prompt, what the user answered is in output.answer
         args = dict(step.args or {})
         action = {"kind": "user", "prompt": str(args.get("prompt") or step.text or "")}
         output = {"answer": _clip(str(args.get("answer") or step.stdout or ""), REPLY_MAX)}
     else:
         raise TraceAdapterError(
-            f"无法识别的事件：第 {idx} 步 kind={step.kind!r}（认 model / tool / judge / user / end）。"
-            f"这份日志需要自己的适配器，不能丢掉事件后当作已编译")
+            f"unrecognized event: step {idx} kind={step.kind!r} (expected model / tool / judge / user / end); "
+            f"this log needs its own adapter; events must not be dropped and the rest treated as compiled")
 
     return Record(step=idx, state=state, clause="", action=action,
                   output=output, vars=dict(values), meta=meta), outcome
@@ -656,7 +714,7 @@ def _record_for(step: RawStep, idx: int, values: dict, *,
 
 def _verify_output(step: RawStep, values: dict, meta: dict
                    ) -> tuple[dict, VerifyOutcome]:
-    """核验步：解析裁决、按变量表更新 ``repair_count`` 与三个 ``verify_*``。"""
+    """Check step: parse the ruling, update ``repair_count`` and the three ``verify_*`` per the variable table."""
     args = dict(step.args or {})
     argv = args.get("argv") or (step.meta or {}).get("argv") or ()
     if isinstance(argv, str):
@@ -665,7 +723,7 @@ def _verify_output(step: RawStep, values: dict, meta: dict
                            timed_out=(step.meta or {}).get("timed_out"))
     prev = values.get("verify_status") or ""
     if prev and prev != PASS:
-        # 上一次核验没过，这次又核验了一次 ⇒ 中间修了一轮。
+        # The previous check did not pass and another check ran => one round of repair in between.
         values["repair_count"] = int(values.get("repair_count") or 0) + 1
     cand = _first_answer(args)
     if cand is not None:
@@ -684,12 +742,13 @@ def _verify_output(step: RawStep, values: dict, meta: dict
 
 
 def _submit_output(step: RawStep, values: dict) -> dict:
-    """提交步：写 ``answer``（与 ``candidate``），并把自报的 ``verified`` 标记带进 output。
+    """Submit step: write ``answer`` (and ``candidate``), and carry the self-reported ``verified`` marker into output.
 
-    ``verified`` 是 :func:`hexis.traces.judge.terminal_kind` 认得的三种线索之一：预算耗尽被
-    强制提交的那次运行标 ``False``，P1 的 ``only_when: {terminal_kind: verified}`` 因此
-    不会在它头上开火。**判不出类别时 P1 照查**（judge._kind_matches 的保守方向），所以
-    这个标记只在采集侧确实知道时才写，不猜。
+    ``verified`` is one of the three clues recognised by :func:`hexis.traces.judge.terminal_kind`:
+    a run forced to submit because its budget was exhausted is marked ``False``, so P1's
+    ``only_when: {terminal_kind: verified}`` does not fire on it. **When the category cannot be
+    determined, P1 is still checked** (the conservative direction of judge._kind_matches), so this
+    marker is written only when the collection side really knows; it never guesses.
     """
     args = dict(step.args or {})
     text = _first_answer(args)
@@ -705,46 +764,55 @@ def _submit_output(step: RawStep, values: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# 整条运行
+# Whole runs
 # --------------------------------------------------------------------------- #
 def to_trace(raw: RawRun, *, acceptance: Optional[Callable[[Any], bool]] = None,
              prohibitions: Iterable[Prohibition] = (),
              artifacts_dir: Any = None,
              snapshot_model_vars: bool = False,
              phase_rules: str = "") -> Trace:
-    """把一次原始运行折成一条已评判的 :class:`~hexis.machine.schema.Trace`。
+    """Fold one raw run into a judged :class:`~hexis.machine.schema.Trace`.
 
-    * 步号从 1 起连续，与 ``runtime.run_task`` 一致；
-    * ``state`` 缺省是 :data:`~hexis.machine.schema.FALLBACK`——臂一臂二整条都是解释执行，每一步
-      都是回退步；臂三由 ``runtime`` 自己写状态名，走不到这里。采集侧要覆盖就写
-      ``step.meta["state"]``；
-    * ``clause`` 一律留空：条款归属由编译 agent 在转录时补，采集时猜一个只会造出假溯源；
-    * ``vars`` 的更新规则见模块文档的变量表。
+    * step numbers are consecutive from 1, consistent with ``runtime.run_task``;
+    * ``state`` defaults to :data:`~hexis.machine.schema.FALLBACK` -- arms one and two are
+      interpretive execution throughout, so every step is a fallback step; arm three has
+      ``runtime`` write its own state names and never gets here. The collection side overrides it
+      via ``step.meta["state"]``;
+    * ``clause`` is always left empty: clause attribution is filled in by the compile agent during
+      transcription, and guessing one at collection time would only fabricate provenance;
+    * the update rules of ``vars`` are in the variable table in the module docs.
 
-    **verdict 的定线**：
+    **How the verdict is decided**:
 
-    1. 任一禁止项被触犯 ⇒ ``rejected``，``error_step`` = 违规发生的那一步（由
-       :func:`hexis.traces.judge.evaluate` 给出）。禁止项优先，哪怕答案是对的；
-    2. 否则若注入了 ``acceptance`` 且它判否 ⇒ ``rejected``，``error_step`` 按下面的优先级；
-    3. 否则若注入了 ``acceptance`` 且它判是 ⇒ ``accepted``；
-    4. **没注入 ``acceptance``** ⇒ ``unknown``。没做客观验收就写 ``accepted``，等于往接受集
-       里掺没验过的轨迹——这与 :func:`hexis.traces.judge.judged` 的缺省不同，是刻意的。
+    1. any prohibition violated => ``rejected``, ``error_step`` = the step where the violation
+       happened (given by :func:`hexis.traces.judge.evaluate`). Prohibitions come first, even if
+       the answer is right;
+    2. otherwise, if ``acceptance`` was injected and says no => ``rejected``, with ``error_step``
+       by the priority below;
+    3. otherwise, if ``acceptance`` was injected and says yes => ``accepted``;
+    4. **no ``acceptance`` injected** => ``unknown``. Writing ``accepted`` without objective
+       acceptance would mix unchecked traces into the accepted set -- this differs from the
+       default of :func:`hexis.traces.judge.judged`, deliberately.
 
-    **``error_step`` 的优先级**（``rejected`` 必须带上它，否则 ``schema.Trace`` 直接抛）：
+    **Priority of ``error_step``** (``rejected`` must carry it, otherwise ``schema.Trace`` raises):
 
-    1. 禁止项违规的那一步——位置精确，且它就是拒绝集排除检查要盯的锚；
-    2. **第一处偏离**：最早一次 ``verify_status != PASS`` 的核验步。这是运行内部第一次
-       出现「事情不对」的可观察证据；
-    3. 最后一步——什么线索都没有时的兜底（从头错到尾，只能指向结局）；
-    4. 一步都没有的空运行记 ``0``（第 1 步之前），因为 ``schema`` 不允许 rejected 缺 error_step。
+    1. the step of the prohibition violation -- precisely located, and it is exactly the anchor
+       the rejection-set exclusion check watches;
+    2. **the first divergence**: the earliest check step with ``verify_status != PASS``. This is
+       the first observable evidence inside the run that "something is off";
+    3. the last step -- the fallback when there is no clue at all (wrong from start to finish, all
+       one can point at is the outcome);
+    4. an empty run with no steps records ``0`` (before step 1), because ``schema`` does not allow
+       rejected without error_step.
     """
     task_in = (raw.task or {}).get("input") if isinstance(raw.task, dict) else None
-    outputs = _phases.outputs_of(task_in or {})     # 产出由**任务声明**，不由分类器猜文件名
+    outputs = _phases.outputs_of(task_in or {})     # outputs are **declared by the task**, not guessed from file names by the classifier
     values = initial_vars()
     if snapshot_model_vars:
-        # 模型侧快照（MODEL_VARS）：从文档引入的判断动作要读它们，标定要它们做样本。
-        # 默认关着：test_17 钉着「每条记录恰好带 initial_vars 的六个变量」，那是单智能体
-        # 路径与既有 80 条轨迹的契约；多智能体的采集路径显式打开。
+        # Model-side snapshots (MODEL_VARS): judge actions introduced from the document read them,
+        # and calibration uses them as samples. Off by default: "every record carries exactly the
+        # six variables of initial_vars" is the contract of the single-agent path and of existing
+        # traces; the multi-agent collection path turns it on explicitly.
         values.update(model_vars())
     records: list[Record] = []
     first_divergence: Optional[int] = None
@@ -762,7 +830,7 @@ def to_trace(raw: RawRun, *, acceptance: Optional[Callable[[Any], bool]] = None,
     check_canonical(draft)
 
     plist = list(prohibitions or ())
-    banned = _judge.evaluate(draft, None, plist)      # 只跑禁止项：acceptance 留到下一步
+    banned = _judge.evaluate(draft, None, plist)      # prohibitions only: acceptance is left for the next step
     if banned.verdict == "rejected":
         verdict, error_step = "rejected", banned.error_step
     elif acceptance is None:
@@ -780,16 +848,19 @@ def to_trace(raw: RawRun, *, acceptance: Optional[Callable[[Any], bool]] = None,
 
 
 def check_canonical(trace: Trace) -> None:
-    """校验跨臂可比性的两条硬约束，不合抛 :class:`TraceAdapterError`。
+    """Check the two hard constraints of cross-arm comparability; raise :class:`TraceAdapterError` on a mismatch.
 
-    1. 每个工具名都已是规范形（``canon_tool_name`` 的不动点），且没有任何提交别名漏网：
-       ``math_verify.py`` 与 ``math_verify`` 在两条臂里各写各的，编译器会开出两个互不成环的
-       状态，回放与路径一致率立刻失真；
-    2. 提交那一步只叫 :data:`SUBMIT_TOOL`。P1 的 ``require_before`` 守的就是这个名字，改名
-       等于把这条臂的违规检查关掉——而报告里会显示「违规率 0%」，看不出是关掉了。
+    1. Every tool name is already canonical (a fixed point of ``canon_tool_name``), and no submit
+       alias slipped through: if ``math_verify.py`` and ``math_verify`` are written differently in
+       two arms, the compiler opens two states that never form a loop, and replay and path
+       agreement are immediately distorted;
+    2. the submit step is named only :data:`SUBMIT_TOOL`. P1's ``require_before`` guards exactly
+       this name; renaming it switches off the violation check for that arm -- and the report would
+       show "violation rate 0%" without revealing that it was switched off.
 
-    顺带校验步号从 1 起连续（编译器与回放都按下标定位 ``error_step``）。经
-    :func:`with_begin` 垫过开局步的视图（首条是 step 0 的 BEGIN_TOOL）同样合法。
+    Also checks that step numbers are consecutive from 1 (the compiler and replay both locate
+    ``error_step`` by index). A view with a begin step prepended by :func:`with_begin` (the first
+    record is BEGIN_TOOL at step 0) is equally valid.
     """
     recs = list(trace.records or ())
     if recs and is_begin(recs[0].action) and recs[0].step == 0:
@@ -797,29 +868,29 @@ def check_canonical(trace: Trace) -> None:
     for i, rec in enumerate(recs, start=1):
         if rec.step != i:
             raise TraceAdapterError(
-                f"步号不连续：第 {i} 条记录的 step={rec.step}（要 1 起连续）")
+                f"non-consecutive step numbers: record {i} has step={rec.step} (must be consecutive from 1)")
         act = rec.action or {}
         if act.get("kind") != "tool":
             continue
         name = str(act.get("name") or "")
         if name != canon_tool_name(name):
             raise TraceAdapterError(
-                f"第 {i} 步的工具名 {name!r} 不是规范形"
-                f"（要 {canon_tool_name(name)!r}）——跨臂就对不齐了")
+                f"tool name {name!r} at step {i} is not canonical"
+                f" (expected {canon_tool_name(name)!r}); arms would no longer line up")
         if name in SUBMIT_ALIASES and name != SUBMIT_TOOL:
             raise TraceAdapterError(
-                f"第 {i} 步的提交动作叫 {name!r}，必须统一成 {SUBMIT_TOOL!r}，"
-                f"否则 P1 的 require_before 在这条臂上永远不开火")
+                f"the submit action at step {i} is named {name!r} and must be unified to {SUBMIT_TOOL!r}, "
+                f"otherwise P1's require_before never fires on this arm")
 
 
 # --------------------------------------------------------------------------- #
-# 落盘与读回
+# Writing to and reading back from disk
 # --------------------------------------------------------------------------- #
 _UNSAFE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 
 
 def _stem(trace: Trace, index: int) -> str:
-    """轨迹文件名：``<task_id>__<arm>__run<NN>``，缺的字段跳过，非法字符折成 ``_``。"""
+    """Trace file name: ``<task_id>__<arm>__run<NN>``; missing fields are skipped, illegal characters fold into ``_``."""
     task = trace.task if isinstance(trace.task, dict) else {}
     parts = [str(task.get("task_id") or f"trace{index:04d}")]
     if trace.arm:
@@ -829,14 +900,16 @@ def _stem(trace: Trace, index: int) -> str:
 
 
 def write_jsonl(traces: Iterable[Trace], out_dir: Any) -> list[Path]:
-    """把若干轨迹逐条写成 ``out_dir/<stem>.jsonl``，返回写出的路径（与入参同序）。
+    """Write traces one by one as ``out_dir/<stem>.jsonl``; returns the written paths (in input order).
 
-    还没搬走的代码正文（寄存在 ``Record.meta["code_bodies"]``）在这里一并搬到
-    ``out_dir/artifacts/<sha>.py``，写出的 JSONL 里只剩哈希。``meta`` 不参与规范化也不参与
-    评判，所以搬与不搬**不会改变任何 verdict**——落盘的那份和内存里那份判出来一样。
+    Code bodies not yet moved out (parked in ``Record.meta["code_bodies"]``) are moved to
+    ``out_dir/artifacts/<sha>.py`` here as well, and the written JSONL keeps only the hashes.
+    ``meta`` takes no part in normalization or judging, so moving or not **never changes any
+    verdict** -- the copy on disk judges the same as the one in memory.
 
-    **不改动入参**：搬运在深拷贝上做。同名（同任务同臂同轮次）时给文件加 ``-2``、``-3``
-    后缀，绝不静默覆盖——覆盖掉的是一条采集不回来的轨迹。
+    **The inputs are not modified**: moving happens on a deep copy. When names collide (same task,
+    same arm, same run) a ``-2``, ``-3`` suffix is added to the file; never overwrite silently --
+    what gets overwritten is a trace that cannot be collected again.
     """
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -864,28 +937,32 @@ def write_jsonl(traces: Iterable[Trace], out_dir: Any) -> list[Path]:
 
 
 def read_jsonl(path: Any) -> Trace:
-    """读回一条轨迹。文件不存在时报清楚是**哪个路径**，别让调用方去猜。"""
+    """Read one trace back. If the file does not exist, say clearly **which path**; don't make the caller guess."""
     p = Path(path)
     if not p.is_file():
-        raise FileNotFoundError(f"轨迹文件不存在: {p}")
+        raise FileNotFoundError(f"trace file does not exist: {p}")
     return Trace.from_jsonl(p)
 
 
 # --------------------------------------------------------------------------- #
-# 通用 agent 轨迹：任何 harness 跑出来的记录都能进编译器
+# Generic agent traces: records produced by any harness can enter the compiler
 # --------------------------------------------------------------------------- #
 def ensure_phases(trace: Trace, rules: str = "default") -> Trace:
-    """按**命令正文**给工具步定阶段（probe / apply / verify / other）。就地改 ``action``，幂等。
+    """Assign phases (probe / apply / verify / other) to tool steps from the **command body**. Modifies ``action`` in place; idempotent.
 
-    阶段是内容的函数，所以只要正文还在就**现算**，不管记录里原来写的是什么。这一条是有代价
-    换来的：``runtime`` 曾经把状态自己的声明抄进记录，于是轨迹说的是「机器认为这一步该干
-    什么」而不是「这一步干了什么」，编译因此是循环的——机器重新学到的只是它自己贴的标签。
-    实测一条 4 步轨迹里三步标错（声明 probe 的状态里命令有 ``wb.save``，实际是 apply；声明
-    apply 的状态只回读产出，实际是 verify）。
+    The phase is a function of the content, so as long as the body is still there it is
+    **recomputed**, regardless of what the record said before. This rule was learned the hard way:
+    ``runtime`` once copied the state's own declaration into the record, so the trace said "what
+    the machine thought this step should do" rather than "what this step did", and compilation
+    became circular -- the machine only relearned the labels it had attached itself. In one
+    measured 4-step trace three steps were mislabelled (a state declared probe had ``wb.save`` in
+    its command, actually apply; a state declared apply only read back the output, actually
+    verify).
 
-    正文取不到时（``_extract_code`` 把它抽走了、只剩 ``code_sha256``）保留原有的标注——
-    拿哈希判不出这一步在干什么，宁可留着旧值也不要瞎改。专用工具（名字即用途）分类器返回
-    空串，同样不动。
+    When the body is unavailable (``_extract_code`` moved it out, leaving only ``code_sha256``),
+    the existing label is kept -- a hash cannot tell what this step is doing, so keeping the old
+    value is better than changing it blindly. For specialised tools (name is purpose) the
+    classifier returns the empty string, and nothing is changed either.
     """
     task = trace.task if isinstance(trace.task, dict) else {}
     outputs = _phases.outputs_of(task.get("input") or {})
@@ -895,7 +972,7 @@ def ensure_phases(trace: Trace, rules: str = "default") -> Trace:
             continue
         inp = dict(act.get("input") or {})
         if not _phases.command_text(inp).strip() and act.get("phase"):
-            continue                       # 正文没了，旧标注是唯一的线索
+            continue                       # the body is gone; the old label is the only clue
         p = _phases.classify(str(act.get("name") or ""), inp, rules, outputs=outputs)
         if p:
             act["phase"] = p
@@ -903,25 +980,27 @@ def ensure_phases(trace: Trace, rules: str = "default") -> Trace:
 
 
 def read_raw_jsonl(path: Any) -> tuple[RawRun, Optional[bool]]:
-    """读一份**原始 agent 事件日志**（不是本仓库的 Trace 格式），折成 :class:`RawRun`。
+    """Read a **raw agent event log** (not this repository's Trace format) and fold it into a :class:`RawRun`.
 
-    首行是头部：``{"task": {...}, "verdict": "accepted"|"rejected"}``（也认 ``"ok": true/false``，
-    或 ``"input": {...}`` 直接当任务输入）。其余每行一步，字段与 :class:`RawStep` 同名::
+    The first line is the header: ``{"task": {...}, "verdict": "accepted"|"rejected"}`` (also
+    accepts ``"ok": true/false``, or ``"input": {...}`` taken directly as the task input). Every
+    other line is one step, with fields named as in :class:`RawStep`::
 
         {"kind": "tool",  "name": "bash",     "args": {"command": "ls"}, "stdout": "...", "returncode": 0}
         {"kind": "tool",  "name": "file_ops", "args": {"op": "read", "path": "a.xlsx"}, "stdout": "..."}
         {"kind": "model", "text": "..."}
         {"kind": "end"}
 
-    返回 ``(RawRun, 判决)``；判决 ``None`` 表示日志没说对错（进不了 T+ 也进不了 T−）。
+    Returns ``(RawRun, verdict)``; a verdict of ``None`` means the log does not say whether it was
+    right (it enters neither T+ nor T−).
     """
     p = Path(path)
     lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]
     if not lines:
-        raise TraceAdapterError(f"空日志: {p}")
+        raise TraceAdapterError(f"empty log: {p}")
     head = json.loads(lines[0])
     if not isinstance(head, dict):
-        raise TraceAdapterError(f"{p} 首行不是 JSON 对象")
+        raise TraceAdapterError(f"first line of {p} is not a JSON object")
     task = dict(head.get("task") or {})
     if "input" in head and "input" not in task:
         task["input"] = dict(head["input"] or {})
@@ -935,7 +1014,7 @@ def read_raw_jsonl(path: Any) -> tuple[RawRun, Optional[bool]]:
     for i, ln in enumerate(lines[1:], start=1):
         d = json.loads(ln)
         if not isinstance(d, dict) or not d.get("kind"):
-            raise TraceAdapterError(f"{p} 第 {i} 步缺 kind")
+            raise TraceAdapterError(f"step {i} of {p} is missing kind")
         steps.append(RawStep(kind=str(d["kind"]), name=str(d.get("name") or ""),
                              args=dict(d.get("args") or d.get("input") or {}),
                              stdout=str(d.get("stdout") or d.get("output") or ""),
@@ -948,9 +1027,10 @@ def read_raw_jsonl(path: Any) -> tuple[RawRun, Optional[bool]]:
 
 
 def tool_output(rec: Any) -> dict:
-    """一条工具记录的完整产出：``output`` 加上采集时放进 ``meta`` 的状态字段（返回码、stderr）。
+    """The complete output of a tool record: ``output`` plus the status fields put into ``meta`` at collection time (return code, stderr).
 
-    这是轨迹**格式**的知识，只住在适配器里：编译器只看合并后的产出字典，不知道哪些字段来自 meta。
+    This is knowledge of the trace **format** and lives only in the adapter: the compiler only sees
+    the merged output dict and does not know which fields came from meta.
     """
     out = dict(getattr(rec, "output", None) or {})
     meta = getattr(rec, "meta", None) or {}
@@ -962,9 +1042,10 @@ def tool_output(rec: Any) -> dict:
 
 def load_any_trace(path: Any, *, phase_rules: str = "default",
                    artifacts_dir: Any = None) -> Trace:
-    """读一份轨迹文件，本仓库 Trace 格式或原始 agent 日志都认，并补齐阶段。
+    """Read a trace file, accepting either this repository's Trace format or a raw agent log, and fill in phases.
 
-    判法看第二行：Trace 的记录行有 ``step``/``action``，原始日志的步骤行有 ``kind``。
+    Decided by the second line: Trace record lines have ``step``/``action``, raw log step lines
+    have ``kind``.
     """
     p = Path(path)
     lines = [ln for ln in p.read_text(encoding="utf-8").splitlines() if ln.strip()]

@@ -1,6 +1,6 @@
 cff-version: 1.2.0
 message: "If you use this software, please cite the accompanying paper."
-title: "skill2fsm: Compiling Agent Skills into Extended Finite State Machines"
+title: "hexis: Compiling Agent Skills into Extended Finite State Machines"
 type: software
 authors:
   - name: "Anonymous Authors"

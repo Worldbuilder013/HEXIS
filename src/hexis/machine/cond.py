@@ -1,18 +1,20 @@
-"""跳转条件的语法、求值与静态分析。
+"""Syntax, evaluation and static analysis of transition guards.
 
-一条跳转条件（``Transition.if``）是**变量上的简单谓词**：等值、比较、集合空判、布尔与或
-非。它有意地弱——弱到可判定。这带来两样东西：
+A guard (``Transition.if``) is a **simple predicate over variables**: equality, comparison, emptiness tests on
+collections, and boolean and/or/not. It is deliberately weak: weak enough to be decidable. That buys two things:
 
-* **确定性可检查。** 同一状态各出边条件两两互斥且覆盖（定理2），靠的是把「无穷的变量
-  取值」压成「有限的格局」再逐个枚举。压缩的依据就是从条件里抽出的原子谓词
-  （:func:`atoms_of`）：一个数值变量只在它被比较的那几个阈值处才可能改变某条边的真假，
-  阈值之间取一个代表值即可。见 compiler.check。
-* **安全。** 求值走一个白名单 AST 访问器，**没有一处 eval/exec**。放行的节点就下面
-  ``_ALLOWED`` 那几类，别的一律 :class:`CondError`。条件表达式是 machine.json 语法的
-  一部分，一台不可信的机器文件里的条件也炸不出沙箱。
+* **Determinism is checkable.** Checking that the guards on a state's out-edges are pairwise mutually exclusive and
+  together exhaustive relies on compressing "infinitely many variable values" into "finitely many configurations" and
+  enumerating them one by one. The compression is based on the atomic predicates extracted from the guards
+  (:func:`atoms_of`): a numeric variable can change the truth of an edge only at the few thresholds it is compared
+  against, so one representative value between thresholds is enough. See compiler.check.
+* **Safety.** Evaluation goes through an allowlisting AST visitor, with **no eval/exec anywhere**. Only the node
+  types accepted by ``_check`` below are let through; anything else is a :class:`CondError`. Guard expressions are
+  part of the machine.json syntax, and a guard in an untrusted machine file cannot break out of the sandbox either.
 
-未定义变量在求值时抛 :class:`CondError`（不是当假）——「变量先写后读」的运行时兜底：一条
-路径若在某变量写入前就读它，这里当场炸，而不是安静地走错边。
+An undefined variable raises :class:`CondError` during evaluation (it is not treated as false). This is the run-time
+safety net for "write before read": if a path reads a variable before it is written, it fails right here instead of
+quietly taking the wrong edge.
 """
 
 from __future__ import annotations
@@ -24,10 +26,10 @@ from typing import Any, Union
 
 
 class CondError(ValueError):
-    """条件表达式非法，或求值时撞上未定义变量。"""
+    """The guard expression is invalid, or its evaluation hit an undefined variable."""
 
 
-#: 白名单谓词函数：作用在集合/字符串上，判空/判非空。
+#: Allowlisted predicate functions: applied to collections/strings, they test for empty/non-empty.
 _PREDICATES = {
     "empty": lambda x: x is None or (hasattr(x, "__len__") and len(x) == 0),
     "nonempty": lambda x: x is not None and hasattr(x, "__len__") and len(x) > 0,
@@ -47,7 +49,7 @@ _CMP_OPS = {
 
 @dataclass(frozen=True)
 class Atom:
-    """一个原子谓词。``op`` ∈ 比较算子名 或 ``empty``/``nonempty``；后者 ``const`` 为 None。"""
+    """An atomic predicate. ``op`` is a comparison operator name or ``empty``/``nonempty`` (then ``const`` is None)."""
 
     var: str
     op: str
@@ -55,17 +57,17 @@ class Atom:
 
 
 # --------------------------------------------------------------------------- #
-# 解析 + 白名单校验（缓存）
+# Parsing + allowlist validation (cached)
 # --------------------------------------------------------------------------- #
 @lru_cache(maxsize=1024)
 def parse(expr: str) -> ast.Expression:
-    """解析成 AST 并逐节点校验白名单。非法即 :class:`CondError`。空串非法。"""
+    """Parse into an AST and check every node against the allowlist. Invalid (including empty) → :class:`CondError`."""
     if not expr or not expr.strip():
-        raise CondError("空条件（兜底边不该走到这里，兜底靠 cond=='' 判定）")
+        raise CondError("empty guard (a default edge should never get here; default edges are detected by cond=='')")
     try:
         tree = ast.parse(expr, mode="eval")
     except SyntaxError as exc:
-        raise CondError(f"条件语法错误: {expr!r} ({exc.msg})") from exc
+        raise CondError(f"guard syntax error: {expr!r} ({exc.msg})") from exc
     _check(tree)
     return tree
 
@@ -75,43 +77,43 @@ def _check(node: ast.AST) -> None:
         _check(node.body)
     elif isinstance(node, ast.BoolOp):                     # and / or
         if not isinstance(node.op, (ast.And, ast.Or)):
-            raise CondError("只允许 and/or")
+            raise CondError("only and/or are allowed")
         for v in node.values:
             _check(v)
     elif isinstance(node, ast.UnaryOp):                    # not
         if not isinstance(node.op, ast.Not):
-            raise CondError("一元算子只允许 not")
+            raise CondError("the only unary operator allowed is not")
         _check(node.operand)
     elif isinstance(node, ast.Compare):                    # ==, !=, <, in ...
         for op in node.ops:
             if type(op) not in _CMP_OPS:
-                raise CondError(f"不允许的比较算子 {type(op).__name__}")
+                raise CondError(f"comparison operator not allowed: {type(op).__name__}")
         _check(node.left)
         for c in node.comparators:
             _check(c)
     elif isinstance(node, ast.Call):                       # empty(x) / nonempty(x)
         if not (isinstance(node.func, ast.Name) and node.func.id in _PREDICATES):
-            raise CondError("只允许 empty(x) / nonempty(x)")
+            raise CondError("only empty(x) / nonempty(x) are allowed")
         if len(node.args) != 1 or node.keywords:
-            raise CondError(f"{node.func.id} 只接受一个位置参数")
+            raise CondError(f"{node.func.id} takes exactly one positional argument")
         _check(node.args[0])
-    elif isinstance(node, (ast.List, ast.Tuple)):          # [a,b] 供 in
+    elif isinstance(node, (ast.List, ast.Tuple)):          # [a,b] for in
         for e in node.elts:
             _check(e)
-    elif isinstance(node, ast.Name):                       # 变量
+    elif isinstance(node, ast.Name):                       # variable
         return
-    elif isinstance(node, ast.Constant):                   # 常量
+    elif isinstance(node, ast.Constant):                   # constant
         if not isinstance(node.value, (str, int, float, bool, type(None))):
-            raise CondError(f"不允许的常量类型 {type(node.value).__name__}")
+            raise CondError(f"constant type not allowed: {type(node.value).__name__}")
     else:
-        raise CondError(f"不允许的语法节点 {type(node).__name__}")
+        raise CondError(f"syntax node not allowed: {type(node).__name__}")
 
 
 # --------------------------------------------------------------------------- #
-# 求值
+# Evaluation
 # --------------------------------------------------------------------------- #
 def evaluate(expr: str, env: dict) -> bool:
-    """在变量取值 ``env`` 下求值，返回 bool。未定义变量 → :class:`CondError`。"""
+    """Evaluate under the variable values ``env`` and return a bool. Undefined variable → :class:`CondError`."""
     tree = parse(expr)
     return bool(_eval(tree.body, env))
 
@@ -129,7 +131,7 @@ def _eval(node: ast.AST, env: dict) -> Any:
             right = _eval(comp, env)
             if not _CMP_OPS[type(op)](left, right):
                 return False
-            left = right                                   # 支持链式 a<b<c
+            left = right                                   # supports chained a<b<c
         return True
     if isinstance(node, ast.Call):                         # empty / nonempty
         return _PREDICATES[node.func.id](_eval(node.args[0], env))
@@ -137,18 +139,18 @@ def _eval(node: ast.AST, env: dict) -> Any:
         return [_eval(e, env) for e in node.elts]
     if isinstance(node, ast.Name):
         if node.id not in env:
-            raise CondError(f"条件用到未定义变量 {node.id!r}（先写后读被破坏）")
+            raise CondError(f"guard uses undefined variable {node.id!r} (write before read violated)")
         return env[node.id]
     if isinstance(node, ast.Constant):
         return node.value
-    raise CondError(f"求值撞到未预期节点 {type(node).__name__}")
+    raise CondError(f"evaluation hit an unexpected node {type(node).__name__}")
 
 
 # --------------------------------------------------------------------------- #
-# 静态分析：供结构检查用
+# Static analysis: for structural checks
 # --------------------------------------------------------------------------- #
 def vars_of(expr: str) -> set[str]:
-    """条件引用的全部自由变量名（供「先写后读」检查）。"""
+    """All free variable names referenced by the guard (for the write-before-read check)."""
     if not expr:
         return set()
     return {n.id for n in ast.walk(parse(expr)) if isinstance(n, ast.Name)
@@ -156,11 +158,11 @@ def vars_of(expr: str) -> set[str]:
 
 
 def atoms_of(expr: str) -> list[Atom]:
-    """抽出全部原子谓词（供 check 枚举有限格局）。
+    """Extract all atomic predicates (so that check can enumerate the finite configurations).
 
-    ``var op const`` 形式的比较（一侧是变量、另一侧是常量）落成 :class:`Atom`；
-    ``empty(x)``/``nonempty(x)`` 落成 ``Atom(x, 'empty'/'nonempty')``。变量对变量的比较
-    不产原子（格局枚举覆盖不了，留给判断动作或 FALLBACK）。
+    Comparisons of the form ``var op const`` (a variable on one side, a constant on the other) become :class:`Atom`;
+    ``empty(x)``/``nonempty(x)`` become ``Atom(x, 'empty'/'nonempty')``. Variable-to-variable comparisons produce no
+    atom (configuration enumeration cannot cover them; they are left to judge actions or FALLBACK).
     """
     out: list[Atom] = []
     for node in ast.walk(parse(expr)):
@@ -183,7 +185,7 @@ def _atom_from_compare(node: ast.Compare) -> Any:
     if isinstance(left, ast.Name) and isinstance(right, ast.Constant):
         return Atom(left.id, opname, right.value)
     if isinstance(right, ast.Name) and isinstance(left, ast.Constant):
-        # 常量在左：翻过来（a < 3 ≡ 3 > a）；in/not in 不对称，不翻
+        # constant on the left: flip it (a < 3 ≡ 3 > a); in/not in are not symmetric and are not flipped
         flip = {"Lt": "Gt", "LtE": "GtE", "Gt": "Lt", "GtE": "LtE",
                 "Eq": "Eq", "NotEq": "NotEq"}
         if opname in flip:
@@ -196,7 +198,7 @@ def _atom_from_compare(node: ast.Compare) -> Any:
 
 
 def thresholds_of(expr: str, var: str) -> list[float]:
-    """某数值变量在条件里被比较的阈值常量（供区间划分）。"""
+    """The threshold constants a numeric variable is compared against in the guard (for interval partitioning)."""
     out: list[float] = []
     for a in atoms_of(expr):
         if a.var == var and a.op in ("Lt", "LtE", "Gt", "GtE", "Eq", "NotEq") \

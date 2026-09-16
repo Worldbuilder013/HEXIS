@@ -7,16 +7,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _fixed_seed():
-    """确定性是这套测试的地基：错误率注入、任务生成都吃固定种子。"""
+    """Determinism is the foundation of this test suite: error rate injection and task generation both use fixed seeds."""
     random.seed(0)
 
 
 @pytest.fixture
 def make_traces():
-    """产一批 table_clean 轨迹（已评判）。可注入判断误差率。"""
-    from hexis.traces import judge
-    from hexis.execution import runtime
+    """Produce a batch of table_clean traces (already judged). A judge error rate can be injected."""
     from hexis.examples import table_clean as tc
+    from hexis.execution import runtime
+    from hexis.traces import judge
 
     def _make(n, *, seed=0, error_rate=0.0):
         refm = tc.reference_machine()
@@ -37,7 +37,7 @@ def make_traces():
 
 @pytest.fixture
 def accepted(make_traces):
-    """只要接受轨迹（T+）。"""
+    """Accepted traces (T+) only."""
     def _acc(n, *, seed=0, error_rate=0.0):
         return [t for t in make_traces(n, seed=seed, error_rate=error_rate)
                 if t.verdict == "accepted"]
@@ -46,7 +46,7 @@ def accepted(make_traces):
 
 @pytest.fixture
 def max_fix():
-    """一条轨迹里 fix_header 出现的次数（= 修复了几轮）。"""
+    """Number of fix_header steps in a trace (= how many repair rounds ran)."""
     def _mf(trace):
         return sum(1 for r in trace.records
                    if (r.action or {}).get("name") == "fix_header")

@@ -336,9 +336,8 @@ src/hexis/
 ├── updater.py            the update loop shared by compile and update
 ├── step_judge.py         the model that decides trace steps
 ├── guide.py              GUIDE.md and PROMPT.md
-├── cli/                  the hexis-agent command
-└── legacy/               modules of an earlier compiler iteration (not used by the CLI)
-tests/                    hermetic test suite (tests/legacy covers the legacy modules)
+└── cli/                  the hexis-agent command
+tests/                    hermetic test suite
 ```
 
 ### Python API

@@ -391,18 +391,6 @@ def test_state_error_from_the_fallback_segment_still_counts_its_steps():
     assert res.fallback_steps == 1 and res.fallback_entry == "s1"
 
 
-def test_replaying_a_run_is_unaffected_by_the_bookkeeping():
-    """meta takes no part in replay: a trace with accounting is still reproduced by the machine that produced it (the foundation of legacy test_05)."""
-    from hexis.legacy import replay
-    task = tc.gen_tasks(1, seed=3)[0]
-    fs = tc.MemFS(task["files"])
-    ref = tc.reference_machine()
-    res = runtime.run_task(ref, task, model=tc.build_model(),
-                           tools=tc.build_registry(fs), doc=tc.skill_doc())
-    assert all(r.meta for r in res.trace.records)
-    assert replay.reproduces(ref, res.trace)
-
-
 # --------------------------------------------------------------------------- #
 # 6. interpreter is only an alias
 # --------------------------------------------------------------------------- #

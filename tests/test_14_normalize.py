@@ -1,13 +1,9 @@
 """(14) Action normalization: dicts in traces and models in machines fold into the same KEY; the loose and strict modes each keep their own boundary.
-
-These assertions are insurance for later "pointing compiler._sig / replay._action_matches at
-normalize": as long as the grouping stays the same, re-pointing does not change behaviour.
 """
 
 import json
 
 from hexis.examples import table_clean as tc
-from hexis.legacy import compiler, replay
 from hexis.machine.schema import (
     EndAction,
     JudgeAction,
@@ -107,7 +103,7 @@ def test_a_record_without_a_prompt_field_is_loose_comparable_only():
 def test_raw_record_dict_and_bare_action_dict():
     """The KEY folded from a whole record (with output) equals the Record's; a bare action dict alone degrades writes to empty.
 
-    The latter is exactly compiler._sig's situation today (it only gets ``rec.action``), so the
+    That is the situation of code that only has ``rec.action``: the
     degraded strict key happens to equal the ``("judge", prompt)`` grouping -- no worse, but no
     more precise either: pass the whole Record for precision.
     """
@@ -196,11 +192,10 @@ def test_model_prompt_never_enters_the_loose_key():
 
 
 def test_end_terminal_participates_in_both_modes():
-    """A different way of ending is not the same step -- this is where loose mode is finer than replay._action_matches, intentionally."""
+    """A different way of ending is not the same step -- loose mode keeps the terminal on purpose."""
     e1, e2 = EndAction(terminal="done"), EndAction(terminal="give_up")
     assert not same_action(e1, e2)
     assert not same_action(e1, e2, strict=True)
-    assert replay._action_matches(e1, {"kind": "end", "terminal": "give_up"})
 
 
 def test_different_kinds_never_collide():
@@ -253,32 +248,6 @@ def _table_clean_records(make_traces):
     kinds = {r.action.get("kind") for r in recs}
     assert recs and {"tool", "judge", "end"} <= kinds
     return recs
-
-
-def test_loose_grouping_equals_replay_action_matches(make_traces):
-    """On table_clean, loose mode groups **pair by pair identically** to replay._action_matches.
-
-    This is insurance for pointing replay at normalize later: what is compared is exactly how
-    replay really uses it -- the action of a machine state x the record of a trace step.
-    """
-    recs = _table_clean_records(make_traces)
-    machine = tc.reference_machine()
-    pairs = 0
-    for state in machine.states.values():
-        for rec in recs:
-            pairs += 1
-            assert replay._action_matches(state.action, rec.action) == \
-                same_action(state.action, rec), (state.id, rec.step, rec.action)
-    assert pairs > 100                                   # really ran over a table, not an empty loop
-
-
-def test_strict_grouping_equals_compiler_sig(make_traces):
-    """On table_clean, strict mode groups **pair by pair identically** to compiler._sig (insurance for re-pointing the compiler)."""
-    recs = _table_clean_records(make_traces)
-    for x in recs:
-        for y in recs:
-            assert (compiler._sig(x.action) == compiler._sig(y.action)) == \
-                same_action(x, y, strict=True), (x.action, y.action)
 
 
 def test_records_of_the_same_step_land_in_one_class(make_traces):

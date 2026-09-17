@@ -27,8 +27,6 @@ Initial release.
 - All messages, reports, prompts and documentation are in English. The abstain label of judge actions is
   `abstain`; machines that use the label of earlier versions still load and run. Recompiling a skill therefore
   shows models English text where earlier versions did not.
-- Modules of an earlier compiler iteration are kept, unchanged, in `hexis.legacy`; the command-line interface does
-  not use them.
 - Fixes: rules written by `compile` keep their label rules when read back; `compile-stepwise` identifies traces by
   file name, so several traces of one task no longer collide; a missing accepted trace is an error instead of being
   left out of the protection replay; endpoint failures stop initialization and rule extraction instead of being

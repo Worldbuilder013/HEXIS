@@ -13,7 +13,6 @@ without a phase behave exactly as before.
 """
 from __future__ import annotations
 
-from hexis.legacy.replay import replay
 from hexis.machine.schema import (
     EndAction,
     Machine,
@@ -160,25 +159,6 @@ def _phased_machine() -> Machine:
         },
         terminals=[{"id": "done"}],
     )
-
-
-def test_replay_matches_phases_without_special_casing():
-    m = _phased_machine()
-    good = to_trace(RawRun(task={"task_id": "g"}, steps=[
-        _py("print(load_workbook(src).active.max_row)"),
-        _py("ws['C1']='=A1'; wb.save(out)"),
-        RawStep(kind="end", args={"terminal": "done"}),
-    ]), phase_rules="default")
-    assert replay(m, good).ok
-
-    # order reversed: apply before probe -- same tool name, but the phases do not match, so replay must report a divergence
-    swapped = to_trace(RawRun(task={"task_id": "b"}, steps=[
-        _py("ws['C1']='=A1'; wb.save(out)"),
-        _py("print(load_workbook(src).active.max_row)"),
-        RawStep(kind="end", args={"terminal": "done"}),
-    ]), phase_rules="default")
-    r = replay(m, swapped)
-    assert not r.ok and r.diverged_at == 0
 
 
 def test_machine_records_which_rules_it_was_compiled_with():

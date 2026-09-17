@@ -21,22 +21,13 @@ ALLOWED: dict[str, dict[str, str]] = {
         "弃权": "abstain label written by earlier versions; still accepted",
     },
     "src/hexis/traces/trace_adapter.py": {
-        "结束": "label prefix produced by the legacy labelers and stored in existing machines",
-        "解答有错": "legacy labeler label stored in existing machines",
-        "核验写错了": "legacy labeler label stored in existing machines",
-    },
-    "src/hexis/legacy/compiler.py": {
-        "判据": "clause keyword recognized in skill documents written in Chinese",
-        "规范": "clause keyword recognized in skill documents written in Chinese",
-    },
-    "src/hexis/legacy/checker.py": {
-        "弱": "provenance origin value stored in existing provenance files",
-        "待标定": "provenance origin value stored in existing provenance files",
-        "已标定": "provenance origin value stored in existing provenance files",
+        "结束": "label prefix produced by the trace labelers and stored in existing machines",
+        "解答有错": "labeler label stored in existing machines",
+        "核验写错了": "labeler label stored in existing machines",
     },
     "tests/test_34_doc_judge.py": {
-        "解答有错": "asserts the legacy labeler labels",
-        "核验写错了": "asserts the legacy labeler labels",
+        "解答有错": "asserts the labeler labels",
+        "核验写错了": "asserts the labeler labels",
     },
     "tests/test_abstain_compat.py": {
         "弃权": "machines written by earlier versions keep working",

@@ -12,19 +12,19 @@ wrong. Two key decisions are built on top of it:
   Folding too much wrongly reports a successful reproduction; folding too little makes every
   machine unable to reproduce any trace.
 
-The repository already had two implementations, and they are **deliberately different**:
+The two decisions need **deliberately different** notions of sameness:
 
-* :func:`hexis.legacy.compiler._sig` (strict) -- tools are merged by name only, but judge actions
+* strict (compilation) -- tools are merged by name only, but judge actions
   also compare ``prompt`` and end actions compare ``terminal``. Compilation must be this strict:
   two judges asking different questions are two different semantic branches, and merging them
   would treat "is the header canonical" and "are the amounts right" as the same step.
-* :func:`hexis.legacy.replay._action_matches` (loose) -- compares only ``kind``, plus the name
+* loose (replay) -- compares only ``kind``, plus the name
   for tools. Replay must be this loose: action arguments in a trace are **concrete values**
   (rendered prompt, filled-in input), while in the machine they are **templates** (``${var}``),
   so a literal comparison never matches; and the prompt carries the problem statement, so
   putting it into the KEY would make every step unique.
 
-So this module does **not unify them**; instead it folds both into two named modes of one
+So this module does **not unify them**; it folds both into two named modes of one
 function: ``strict=True`` is the compilation side, ``strict=False`` (the default) is the replay
 side. Which mode to use is a semantic question, not an implementation detail, hence it is in the
 signature.
@@ -208,7 +208,7 @@ def canon_action(rec_or_action: Any, *, strict: bool = False) -> tuple[str, ...]
     """Fold one action into a KEY. ``strict=False`` is the replay mode, ``True`` the compile mode (differences in the module docs).
 
     Returns a tuple of ``str`` only: hashable, JSON-serializable, stable across processes. An
-    unknown kind returns just ``(kind,)`` -- consistent with the fallback in compiler._sig; no
+    unknown kind returns just ``(kind,)`` -- the same fallback as the strict signature; no
     structure is invented.
     """
     act, out = _unwrap(rec_or_action)
@@ -259,9 +259,8 @@ def context_key(rec_or_action: Any, preds: Sequence[Any] = (), *,
     successors would require knowing the future, which is the job of conditions and judges, not
     of identity.
 
-    Replay **does not look** at this KEY: :func:`hexis.legacy.replay._action_matches` only compares
-    actions (loose mode), and a cloned state's action is a deep copy, so identity refinement is
-    transparent to replay -- the splitting in test_08 has already shown this.
+    Replay **does not look** at this KEY: it only compares actions (loose mode), and a cloned state's
+    action is a deep copy, so identity refinement is transparent to replay.
     ``k=0`` degenerates to ``canon_action(strict=True)``.
     """
     base = canon_action(rec_or_action, strict=True)

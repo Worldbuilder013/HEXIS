@@ -114,7 +114,7 @@ class ModelAction(BaseModel):
     #: A generation state **introduced** by the compiler (input gate: when a tool input varies from task to task and no
     #: variable can stand in for it, a generation step is inserted before the tool). The trace has no such step, so in
     #: replay it is **zero-width**: it consumes no record, and the variables it writes take the real input of the tool
-    #: record that immediately follows (see replay.walk). At run time it is a real model call.
+    #: record that immediately follows. At run time it is a real model call.
     introduced: bool = False
     #: An **observable** model state: what it writes is deliverable content (summary, answer, report), and it
     #: corresponds to a model-output event in the trace, which alignment and replay treat as a primary state. Default
@@ -157,7 +157,7 @@ class JudgeAction(BaseModel):
     support: int = 0
     #: **Introduced from the document** by the compiler (the traces have no such judge step). In replay it is
     #: zero-width: it consumes no trace record, and its label is computed on the spot by the program labeler named in
-    #: ``gold_from`` (see replay.walk).
+    #: ``gold_from``.
     introduced: bool = False
     #: Name of a **program** labeler registered in trace_adapter.LABELERS. Empty string = no program can give it a gold
     #: label, so it cannot be calibrated, ``support`` stays 0, and it may only carry a default edge to FALLBACK.
@@ -221,8 +221,7 @@ class Transition(BaseModel):
     inc: Optional[str] = None
     support: int = 0
     #: Why this edge exists: document / trace / compiler / harness (pending calibration) ... (empty string = not
-    #: recorded). The full provenance row is in the checker's provenance table; only a short tag that can be dumped
-    #: with the machine is kept here.
+    #: recorded). Only a short tag that can be dumped with the machine is kept here.
     origin: str = ""
 
 
@@ -336,7 +335,7 @@ class Machine(BaseModel):
     prohibitions: list[Prohibition] = Field(default_factory=list)
     thresholds: Thresholds = Field(default_factory=Thresholds)
     #: Canonical names of the **program-executed audit tools** (``math_verify`` / ``audit_workbook``). Every terminal
-    #: with ``kind="verified"`` must be reachable only through one of them (the checker's E_VERIFIED_UNAUDITED), and at
+    #: with ``kind="verified"`` is meant to be reachable only through one of them, and at
     #: run time these names must have real executors in the tool table. They come from the skill configuration / the
     #: ``requires`` of the verification prohibition, never from the model. Empty list = this machine claims no
     #: "verified" way of ending.

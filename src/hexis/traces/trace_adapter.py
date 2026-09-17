@@ -379,10 +379,10 @@ def initial_vars() -> dict:
     }
 
 
-#: **Model-side** variables: arms one and two expose only tool calls, so what is in the model's head
+#: **Model-side** variables: agent traces expose only tool calls, so what is in the model's head
 #: (what it said last, which tool it called last, whether that succeeded) originally has no
 #: snapshot in the trace. Judge actions introduced from the document need to read exactly these --
-#: without a snapshot, ``fit.calibrate`` has no samples to calibrate on. So each record's ``vars``
+#: without a snapshot, such a judge has no samples to be calibrated on. So each record's ``vars``
 #: additionally records these three; they are not in :func:`initial_vars` (that is the fixed
 #: tool-side variable table), and the compiler does not treat them as machine variables -- unless
 #: some judge action declares that it reads them.
@@ -445,9 +445,8 @@ def with_input(trace: Trace, keys: Sequence[str]) -> Trace:
 # --------------------------------------------------------------------------- #
 #: ``gold_from`` name -> ``(trace, i) -> label | None``. ``i`` is the index of the record
 #: **before** the judge in the trace (a zero-width judge consumes no record). Labelers are pure
-#: functions, reviewed like prohibitions; **a model never produces gold labels**. Replay
-#: (replay.walk) and calibration (the samples of fit.calibrate) use the same table, so the two
-#: sides agree by construction.
+#: functions, reviewed like prohibitions; **a model never produces gold labels**. Replay and
+#: calibration use the same table, so the two sides agree by construction.
 LABELERS: dict[str, Callable[[Trace, int], Optional[str]]] = {}
 
 
@@ -778,8 +777,8 @@ def to_trace(raw: RawRun, *, acceptance: Optional[Callable[[Any], bool]] = None,
       interpretive execution throughout, so every step is a fallback step; arm three has
       ``runtime`` write its own state names and never gets here. The collection side overrides it
       via ``step.meta["state"]``;
-    * ``clause`` is always left empty: clause attribution is filled in by the compile agent during
-      transcription, and guessing one at collection time would only fabricate provenance;
+    * ``clause`` is always left empty: clause attribution belongs to compilation, and guessing one
+      at collection time would only fabricate provenance;
     * the update rules of ``vars`` are in the variable table in the module docs.
 
     **How the verdict is decided**:

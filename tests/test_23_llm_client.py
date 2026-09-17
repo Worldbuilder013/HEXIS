@@ -292,7 +292,7 @@ def test_transport_errors_are_retried_then_give_up():
 
 
 def test_backoff_uses_a_private_rng(monkeypatch):
-    """Jitter must not consume the global random stream: the calibration test (tests/legacy/test_10_calibrate.py) pins seeded error-rate injection."""
+    """Jitter must not consume the global random stream: seeded error-rate injection in scripted models must stay reproducible."""
     import random as _random
 
     monkeypatch.setattr(_random, "random",

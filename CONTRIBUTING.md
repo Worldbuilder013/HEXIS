@@ -23,8 +23,6 @@ The package is `hexis` (distribution and command `hexis-agent`):
 - `hexis.llm`, `hexis.tools`, `hexis.traces`: model access, tool backends, trace formats.
 - `hexis.builddir`, `hexis.updater`, `hexis.step_judge`, `hexis.guide`: build directories, the update loop, the
   model decider and the usage guides.
-- `hexis.legacy`: modules of an earlier compiler iteration. The command-line interface does not import them; do
-  not use them in new code.
 
 ## Guidelines
 

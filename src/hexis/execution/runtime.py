@@ -215,7 +215,7 @@ def _step_tokens(before: Optional[dict], after: Optional[dict],
 def _argv_of(tools: Any, name: str, out: Any) -> Optional[list]:
     """The argv **actually executed** in this step. Taken from the tool output if present, otherwise asked of the tool object.
 
-    :class:`~hexis.legacy.sandbox.ExecResult` records ``command``; other tools may call it ``argv``/``cmd``. If
+    A sandbox result records ``command``; other tools may call it ``argv``/``cmd``. If
     none is available, return ``None`` -- the report would rather leave it empty than pass off a command line
     reconstructed from the input template as the one that really ran. This column captures exactly the
     difference between the two: ``math_verify.py`` needs ``--json`` **before** the subcommand, and the executor
@@ -595,11 +595,10 @@ def halt_at_fallback(machine: Machine) -> Machine:
     action is ``end`` (for the empty machine and compiled machines alike), so the machine stops cleanly there and
     control returns to the caller.
 
-    Three places need this, for different reasons, but none of them wants runtime to interpret on its own: arm
-    three needs the fallback segment to be continued by **the same** executor as the other two arms (otherwise
-    "how much the fallback segment cost" is not comparable); the conformance check wants to see how far the
-    machine gets **on its own**; and ``--no-fallback`` means "stop on entering fallback". So there is only this
-    one implementation.
+    Callers need this, for different reasons, but none of them wants runtime to interpret on its own: an external
+    executor may continue the fallback segment itself (so its cost stays comparable with fully interpreted runs); a
+    check may want to see how far the machine gets **on its own**; and "no fallback" means "stop on entering
+    fallback". So there is only this one implementation.
 
     The original machine is left byte-for-byte untouched; if the sentinel collides with a real state, a suffix is
     added -- colliding without avoiding it would make that state the fallback state, and the machine would start

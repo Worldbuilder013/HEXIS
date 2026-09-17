@@ -29,7 +29,7 @@ state and a set of variables, executes the operation assigned to the current sta
 guards over the recorded values to decide what comes next. Language models do the reasoning and generation inside
 states, with the state's prompt and the variables it reads; the order of operations is enforced by the program.
 
-This package accompanies the paper *Compiling Agent Skills into Extended Finite State Machines*.
+This package accompanies the paper *HEXIS: Compiling Agent Skills into Extended Finite State Machines*.
 <p align="center">
 <img src="docs/figures/showcase.jpg" width="880"
      alt="hexis: a SKILL.md document is compiled into an extended finite state machine whose states, guards and variables enforce the order of operations while language models reason inside the states">

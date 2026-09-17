@@ -52,13 +52,15 @@ This package accompanies the paper *Compiling Agent Skills into Extended Finite 
 ## How it works
 
 <p align="center">
-  <img src="docs/figures/overview.png" width="820"
-       alt="Native skill execution, where the model infers the next operation, compared with hexis, where a program evaluates the transition condition and selects the next state">
+  <img src="docs/figures/system.png" width="880"
+       alt="(a) Initialization: a model drafts machine.json from the skill document and tool specs and redrafts it until validation passes. (b) Trajectory update: events are extracted from a trace, aligned with the machine, applied to a copy, and the copy is accepted only after checks and replay">
 </p>
 
-*Native execution uses model inference to select the next operation; skill optimization, reflection and memory
-improve the model's inputs. hexis uses a program to evaluate transition conditions and execute the operation
-assigned to the selected state.*
+*(a) Initialization: a language model drafts `machine.json` from the skill document and the tool specifications
+and redrafts it until validation passes, giving the initial machine M0. (b) Trajectory update: each trace is
+folded into events, aligned with the current machine and applied to a copy (match, new, ignore); the copy is
+accepted only if it passes the invariants and replays both the new trace and every previously accepted trace.
+Otherwise the update is retried once and the machine is kept.*
 
 1. **Compile.** The model reads the skill document, its clauses, the tool definitions, the task input fields and
    the skill rules, and drafts a machine. Static checks (format, schema, guards, reachability and termination,

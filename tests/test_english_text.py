@@ -20,9 +20,6 @@ ALLOWED: dict[str, dict[str, str]] = {
     "src/hexis/machine/schema.py": {
         "弃权": "abstain label written by earlier versions; still accepted",
     },
-    "src/hexis/cli/collect.py": {
-        "工作簿在": "marker inside existing spreadsheet task files",
-    },
     "src/hexis/traces/trace_adapter.py": {
         "结束": "label prefix produced by the legacy labelers and stored in existing machines",
         "解答有错": "legacy labeler label stored in existing machines",

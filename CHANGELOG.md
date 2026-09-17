@@ -21,12 +21,9 @@ Initial release.
 - `hexis-agent guide`: `GUIDE.md` (inputs, tools, Mermaid diagram, states, transitions, limits, fallback) and
   `PROMPT.md` (a system prompt that lets a tool-using agent execute the machine); written by `compile` and
   `update` as well.
-- `hexis-agent run --mode task`: run any machine on inputs given with `--input KEY=VALUE` in a kept `--workdir`;
-  `--machine` accepts a build directory.
+- `hexis-agent run`: run any machine on inputs given with `--input KEY=VALUE` in a kept `--workdir`; `--machine`
+  accepts a build directory.
 - Tool backends: OpenCode native tools, a local `bash` subprocess, and model-realized tools defined in a registry.
-- Graders: SpreadsheetBench golden workbooks, multiple-choice answers, DABench `@name[value]` answers and file-answer
-  tasks.
-- Benchmark harness: `collect`, `fold-traces`, `bench`, `memory` and `summarize`.
 - All messages, reports, prompts and documentation are in English. The abstain label of judge actions is
   `abstain`; machines that use the label of earlier versions still load and run. Recompiling a skill therefore
   shows models English text where earlier versions did not.

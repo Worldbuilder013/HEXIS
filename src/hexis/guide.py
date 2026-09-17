@@ -274,7 +274,7 @@ def render_guide(m: Machine, *, tools: Optional[Mapping[str, Any]] = None, skill
 
     out += ["## Running the machine", "",
             "With the command-line interface (a build directory can be passed as `--machine`):", "",
-            fence("hexis-agent run --mode task --machine BUILD_DIR "
+            fence("hexis-agent run --machine BUILD_DIR "
                   + " ".join(f"--input {k}=..." for _v, k, _t in ins) + " --workdir WORK_DIR --executor local", "bash"),
             "",
             "From Python:", "",

@@ -20,11 +20,6 @@ COMMANDS: dict[str, tuple[str, str]] = {
                          "Update a machine trace by trace with externally supplied step decisions."),
     "guide": ("hexis.cli.guide", "Write GUIDE.md and PROMPT.md (a prompt for agents) for a compiled machine."),
     "run": ("hexis.cli.run", "Execute a machine on one task."),
-    "collect": ("hexis.cli.collect", "Collect skill-execution traces with OpenCode on spreadsheet tasks."),
-    "fold-traces": ("hexis.cli.fold_traces", "Fold the OpenCode event streams of a benchmark run into traces."),
-    "bench": ("hexis.cli.bench", "Run machine and skill-execution arms on a task set in parallel."),
-    "memory": ("hexis.cli.memory", "Build AWM workflows and ReasoningBank memories from trajectories."),
-    "summarize": ("hexis.cli.summarize", "Compare arms on a shared task set: pass rate, cost, paired tests."),
 }
 
 

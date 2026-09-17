@@ -1,4 +1,4 @@
-"""``run --mode task`` runs any machine on inputs given on the command line, in a kept working directory."""
+"""``run`` runs any machine on inputs given on the command line, in a kept working directory."""
 from __future__ import annotations
 
 import json
@@ -50,7 +50,7 @@ def setup(tmp_path, monkeypatch):
 @pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
 def test_task_mode_runs_in_the_working_directory(setup, capsys):
     work = setup / "work"
-    code = cli_main(["run", "--mode", "task", "--machine", str(setup / "machine.json"), "--skill", str(setup / "skill"),
+    code = cli_main(["run", "--machine", str(setup / "machine.json"), "--skill", str(setup / "skill"),
                      "--input", "text=hello", "--workdir", str(work), "--executor", "local",
                      "--json", str(setup / "trace.jsonl"), "--quiet"])
     assert code == 0
@@ -61,6 +61,6 @@ def test_task_mode_runs_in_the_working_directory(setup, capsys):
 
 def test_task_mode_requires_the_declared_inputs(setup):
     with pytest.raises(SystemExit) as exc:
-        cli_main(["run", "--mode", "task", "--machine", str(setup / "machine.json"), "--skill", str(setup / "skill"),
+        cli_main(["run", "--machine", str(setup / "machine.json"), "--skill", str(setup / "skill"),
                   "--executor", "local"])
     assert exc.value.code == 2

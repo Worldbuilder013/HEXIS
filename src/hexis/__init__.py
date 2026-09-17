@@ -10,7 +10,6 @@ states. Subpackages:
 * :mod:`hexis.llm`, :mod:`hexis.tools`, :mod:`hexis.traces`: model access, tool backends, trace formats;
 * :mod:`hexis.builddir`, :mod:`hexis.updater`, :mod:`hexis.step_judge`, :mod:`hexis.guide`: build directories,
   model-driven updates and usage guides;
-* :mod:`hexis.evaluators`: graders;
 * :mod:`hexis.cli`: the ``hexis-agent`` command;
 * :mod:`hexis.legacy`: modules of an earlier compiler iteration, not used by the command-line interface.
 

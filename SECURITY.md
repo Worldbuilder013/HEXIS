@@ -2,11 +2,11 @@
 
 ## Execution model
 
-hexis runs agents. `hexis-agent run`, `hexis-agent bench` and `hexis-agent collect` execute tool calls whose
+hexis runs agents. `hexis-agent run` executes tool calls whose
 arguments are produced by a language model, including arbitrary shell commands (`bash`) and file writes.
 Treat machines, skills and task files as code.
 
-- Run experiments in a disposable environment (container or virtual machine) that holds no credentials
+- Run hexis in a disposable environment (container or virtual machine) that holds no credentials
   or data you need to protect.
 - `--executor local` runs `bash` tool calls with `subprocess` and `shell=True` in the job directory, with
   the permissions of the current user and no further isolation. The default executor, OpenCode, also runs

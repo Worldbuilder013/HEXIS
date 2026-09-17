@@ -1,27 +1,16 @@
 """Execute a machine on one task.
 
-Every model and tool call is printed as it happens. Modes:
+Give every task input the machine declares with ``--input KEY=VALUE`` (repeatable) or ``--input-file
+inputs.json``; ``--prompt`` sets ``request``. Every model and tool call is printed as it happens.
 
-* ``xlsx``: spreadsheet task. Give ``--workbook`` and ``--prompt`` (plus ``--golden`` and
-  ``--answer-position`` to grade), or ``--task`` with a SpreadsheetBench verified-400 directory
-  (``--bench-dir``). Grading follows SpreadsheetBench: LibreOffice recalculates the output workbook
-  and only the cached values in the answer range are compared.
-* ``livemath``: multiple-choice question answered in ``answer.txt`` as ``\\boxed{X}``. Give ``--prompt``
-  (and ``--answer`` to grade) or ``--task`` with ``--tasks-file``.
-* ``filetask``: task from ``--tasks-file`` whose assets are copied into the working directory; the
-  answer goes to ``answer.txt`` and is graded according to ``metadata.verifier``.
-* ``task``: any machine on any inputs. Give every task input the machine declares with ``--input KEY=VALUE``
-  (repeatable) or ``--input-file inputs.json``; ``--prompt`` sets ``request``. Tools run in ``--workdir``, which
-  is kept. Nothing is graded.
+Tool steps run through OpenCode's native tools (``--executor opencode``) or a local ``bash`` subprocess
+(``--executor local``) in ``--workdir``; rendered argument templates are passed unchanged. When a step fails,
+the fallback state first retries from the most recent tool step (``--retries``) and then hands the task to
+interpreted execution of ``SKILL.md``, unless ``--no-interpret`` is given. The model endpoint is configured with
+``--model``, ``--base-url`` and ``--api-key-env`` or through the environment (see :mod:`hexis.llm.env`).
 
-Tool steps run through OpenCode's native tools (``--executor opencode``) or a local ``bash``
-subprocess (``--executor local``); rendered argument templates are passed unchanged. When a step fails,
-the fallback state first retries from the most recent tool step (``--retries``) and then hands the task
-to interpreted execution of ``SKILL.md``, unless ``--no-interpret`` is given. The model endpoint is
-configured through ``.env`` (see :mod:`hexis.llm.env`).
-
-    hexis-agent run --mode livemath --machine machine.json --skill skills/livemath \\
-        --task lm_202606_001 --tasks-file tasks/livemath.yaml --model qwen3.6-flash
+    hexis-agent run --machine BUILD_DIR --input request="Clean data.csv" --workdir work/ --executor local \\
+        --model MODEL_ID --base-url URL
 """
 from __future__ import annotations
 
@@ -29,16 +18,12 @@ import argparse
 import contextlib
 import json
 import pathlib
-import shutil
 import sys
 import time
 from tempfile import TemporaryDirectory
 
 from hexis.llm.llm_client import client_from_env
 from hexis.machine.schema import load_machine
-
-DEFAULT_BENCH_DIR = "third_party/SpreadsheetBench/spreadsheetbench_verified_400"
-
 
 def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog=prog, description=__doc__.split("\n")[0])
@@ -47,25 +32,13 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
     ap.add_argument("--skill", default=None,
                     help="skill directory; its SKILL.md is used by interpreted execution after fallback "
                          "(default for a build directory: BUILD/skill)")
-    ap.add_argument("--mode", choices=("xlsx", "livemath", "filetask", "task"), default="xlsx",
-                    help="task type (see above)")
     ap.add_argument("--input", action="append", default=None, metavar="KEY=VALUE",
-                    help="task mode: a task input; repeatable")
-    ap.add_argument("--input-file", default=None, help="task mode: JSON object with the task inputs")
+                    help="a task input; repeatable")
+    ap.add_argument("--input-file", default=None, help="JSON object with the task inputs")
     ap.add_argument("--workdir", default=None,
                     help="working directory for tool calls, created if needed and kept (default: a temporary "
                          "directory that is removed afterwards)")
-    ap.add_argument("--task", default=None,
-                    help="task id: a SpreadsheetBench id such as sb_49801 (xlsx) or an id in --tasks-file")
-    ap.add_argument("--tasks-file", default=None, help="task YAML for the livemath and filetask modes")
-    ap.add_argument("--bench-dir", default=DEFAULT_BENCH_DIR,
-                    help="SpreadsheetBench verified-400 directory used by --task in xlsx mode")
-    ap.add_argument("--data-root", default=".", help="directory that asset paths in the task file are relative to")
-    ap.add_argument("--prompt", default=None, help="task text (taken from the task when --task is given)")
-    ap.add_argument("--answer", default=None, help="reference answer letter (livemath)")
-    ap.add_argument("--workbook", default=None, help="input workbook (xlsx)")
-    ap.add_argument("--golden", default=None, help="golden workbook (xlsx); grading needs --answer-position too")
-    ap.add_argument("--answer-position", default=None, help="graded range (xlsx), e.g. C1 or B2:B17")
+    ap.add_argument("--prompt", default=None, help="task text, passed as the input request")
     ap.add_argument("--max-steps", type=int, default=None, help="step limit (default: the machine's max_steps)")
     ap.add_argument("--retries", type=int, default=3,
                     help="retries at the fallback state, each re-entering the most recent tool step")
@@ -73,8 +46,7 @@ def build_parser(prog: str | None = None) -> argparse.ArgumentParser:
                     help="stop when the retries are exhausted instead of handing the task to interpreted execution")
     ap.add_argument("--json", default=None, help="write the trace as JSONL to this file")
     ap.add_argument("--result-json", default=None,
-                    help="write a structured result (verdict, stop reason, path, tokens, time) to this file")
-    ap.add_argument("--keep", default=None, help="copy the produced file to this path")
+                    help="write a structured result (stop reason, path, tokens, time) to this file")
     ap.add_argument("--quiet", action="store_true", help="print the summary only, not every step")
     ap.add_argument("--provider", default="default",
                     help="endpoint profile: 'default' reads MODEL / BASE_URL / API_KEY; minimax / deepseek read prefixed keys")
@@ -114,30 +86,12 @@ def main(argv: list[str] | None = None, prog: str | None = None) -> int:
             a.skill = str(build_skill)
         else:
             ap.error("--skill is required unless --machine is a build directory")
-    if a.mode == "task":
-        a.task_inputs = _task_inputs(ap, a)
-        return run_machine(a)
-    if a.mode == "livemath":
-        if a.task:
-            if not a.tasks_file:
-                ap.error("--task in livemath mode needs --tasks-file")
-            _fill_from_tasks_file(a)
-        elif not a.prompt:
-            ap.error("livemath mode needs --task or --prompt")
-    elif a.mode == "filetask":
-        if not a.task or not a.tasks_file:
-            ap.error("filetask mode needs --task and --tasks-file")
-        _fill_from_tasks_file(a)
-    else:
-        if a.task:
-            _fill_from_bench(a)
-        if not a.workbook or not a.prompt:
-            ap.error("xlsx mode needs --workbook and --prompt, or --task with --bench-dir")
+    a.task_inputs = _task_inputs(ap, a)
     return run_machine(a)
 
 
 def _task_inputs(ap, a) -> dict:
-    """Task inputs for the task mode, checked against the variables the machine initializes from the task."""
+    """The task inputs, checked against the variables the machine initializes from the task."""
     inputs: dict = {}
     if a.input_file:
         data = json.loads(pathlib.Path(a.input_file).read_text(encoding="utf-8"))
@@ -159,39 +113,6 @@ def _task_inputs(ap, a) -> dict:
     return inputs
 
 
-def _fill_from_bench(a) -> None:
-    """``--task 49801`` or ``sb_49801``: prompt, input and golden workbooks and answer range from the
-    SpreadsheetBench ``dataset.json``. Options given explicitly take precedence."""
-    bench = pathlib.Path(a.bench_dir)
-    if not (bench / "dataset.json").is_file():
-        raise SystemExit(f"{bench / 'dataset.json'} not found: download SpreadsheetBench verified-400 or pass --bench-dir")
-    sid = str(a.task).replace("sb_", "")
-    rows = {str(r["id"]): r for r in json.loads((bench / "dataset.json").read_text(encoding="utf-8"))}
-    if sid not in rows:
-        raise SystemExit(f"task {sid} not found in {bench / 'dataset.json'}")
-    r = rows[sid]
-    d = bench / r["spreadsheet_path"]
-    a.prompt = a.prompt or r["instruction"]
-    a.workbook = a.workbook or str(sorted(d.glob("*_init.xlsx"))[0])
-    a.golden = a.golden or str(sorted(d.glob("*_golden.xlsx"))[0])
-    a.answer_position = a.answer_position or r["answer_position"]
-
-
-def _fill_from_tasks_file(a) -> None:
-    """``--task ID --tasks-file tasks.yaml``: prompt, and the reference answer (livemath) or the whole
-    task entry (filetask)."""
-    import yaml
-    rows = {str(r["id"]): r for r in yaml.safe_load(pathlib.Path(a.tasks_file).read_text(encoding="utf-8"))}
-    if str(a.task) not in rows:
-        raise SystemExit(f"task {a.task} not found in {a.tasks_file}")
-    r = rows[str(a.task)]
-    a.prompt = a.prompt or str(r["turns"][0])
-    if a.mode == "livemath":
-        a.answer = str(r["metadata"]["answer"])
-    else:
-        a.filetask = r
-
-
 def run_machine(a) -> int:
     """Run the machine on the task described by the parsed options ``a``."""
     from hexis.execution import runtime
@@ -199,7 +120,6 @@ def run_machine(a) -> int:
     from hexis.tools.opencode_tools import FALLBACK_PROTOCOL, PRIMITIVES, OpenCodeTools
 
     m = load_machine(pathlib.Path(a.machine))
-    mode = getattr(a, "mode", "xlsx")
     unsupported = sorted({st.action.name for st in m.states.values()
                           if st.action.kind == "tool" and st.action.name not in PRIMITIVES})
     realize_specs = {}
@@ -225,11 +145,7 @@ def run_machine(a) -> int:
     md = pathlib.Path(a.skill) / "SKILL.md"
     doc = FALLBACK_PROTOCOL + (md.read_text(encoding="utf-8") if md.is_file() else "")
     print(f"machine: {a.machine}  ({m.n_states()} states, initial {m.initial})")
-    if mode == "task":
-        print(f"task inputs: {json.dumps(a.task_inputs, ensure_ascii=False)[:300]}")
-    else:
-        print(f"task: {a.prompt[:300]}")
-        print(f"input workbook: {a.workbook}" if mode == "xlsx" else "output: answer.txt")
+    print(f"task inputs: {json.dumps(a.task_inputs, ensure_ascii=False)[:300]}")
     print("=" * 78, flush=True)
     t0 = time.time()
 
@@ -297,23 +213,7 @@ def run_machine(a) -> int:
             cl.model = a.model
         print(f"endpoint: {cl.model} @ {cl.base_url}", flush=True)
         work = pathlib.Path(directory)
-        if mode == "xlsx":
-            if a.workbook:
-                shutil.copy(a.workbook, work / "input.xlsx")
-            task = {"task_id": "prompt", "input": {
-                "request": a.prompt, "problem": a.prompt, "input_path": str(work / "input.xlsx"),
-                "output_path": str(work / "output.xlsx")}}
-        elif mode == "filetask":
-            from hexis.evaluators.filetask import stage_assets
-            extra = stage_assets(a.filetask.get("metadata") or {}, work, root=getattr(a, "data_root", "."))
-            task = {"task_id": str(a.task), "input": {
-                "request": a.prompt, "problem": a.prompt, "output_path": str(work / "answer.txt"),
-                "work_dir": str(work), **extra}}
-        elif mode == "task":
-            task = {"task_id": str(getattr(a, "task", None) or "task"), "input": dict(a.task_inputs)}
-        else:
-            task = {"task_id": str(getattr(a, "task", "prompt") or "prompt"), "input": {
-                "request": a.prompt, "problem": a.prompt, "output_path": str(work / "answer.txt")}}
+        task = {"task_id": "task", "input": dict(a.task_inputs)}
         max_tokens = int(getattr(a, "max_tokens", 32768))
         no_think = {"enable_thinking": False}
         gen_extra = (no_think if getattr(a, "no_think", False)
@@ -352,24 +252,6 @@ def run_machine(a) -> int:
                                   retries=int(getattr(a, "retries", 3)),
                                   interpret=not getattr(a, "no_interpret", False))
         print(f"--- finished in {time.time() - t0:.0f}s ---\n", flush=True)
-        produced = None if mode == "task" else work / ("output.xlsx" if mode == "xlsx" else "answer.txt")
-        kept = pathlib.Path(a.keep) if a.keep else None
-        if kept and produced is not None and produced.is_file():
-            kept.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy(produced, kept)
-        ok_produced = produced.is_file() if produced is not None else False
-        verdict = None
-        if mode == "livemath":
-            if getattr(a, "answer", None) is not None:
-                from hexis.evaluators.mcq_boxed import grade_answer_file
-                verdict = grade_answer_file(produced, a.answer)
-        elif mode == "filetask":
-            from hexis.evaluators.filetask import grade as grade_filetask
-            verdict = grade_filetask(a.filetask.get("metadata") or {}, produced)[:2]
-        elif a.golden and a.answer_position:
-            from hexis.evaluators.spreadsheet_golden import compare_workbooks
-            verdict = (compare_workbooks(pathlib.Path(a.golden), produced, a.answer_position)
-                       if ok_produced else (False, "no output workbook"))
 
     if getattr(a, "result_json", None):
         rp = pathlib.Path(a.result_json)
@@ -386,14 +268,12 @@ def run_machine(a) -> int:
             "machine_prompt_tokens": seg["machine"][0], "machine_completion_tokens": seg["machine"][1],
             "machine_steps": seg["machine"][2],
             "fallback_prompt_tokens": seg["fallback"][0], "fallback_completion_tokens": seg["fallback"][1],
-            "passed": bool(verdict[0]) if verdict is not None else None,
-            "why": verdict[1] if verdict is not None else "not graded",
             "stopped": rr.stopped, "error": rr.error or "", "path": rr.path(),
             "llm_calls": rr.llm_calls, "prompt_tokens": rr.prompt_tokens,
             "completion_tokens": rr.completion_tokens, "unmeasured_calls": rr.unmeasured_calls,
             "fallback_entry": rr.fallback_entry, "fallback_steps": rr.fallback_steps,
             "retries": rr.retries,
-            "tool_calls": len(getattr(tools, "calls", []) or []), "produced": bool(ok_produced),
+            "tool_calls": len(getattr(tools, "calls", []) or []),
             "realized_calls": len(getattr(tools, "realized", []) or []),
             "duration_s": round(time.time() - t0, 2), "model": cl.model,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -430,19 +310,9 @@ def run_machine(a) -> int:
             else:
                 print(f"[{rec.state:>10}] {k} {act}")
 
-    if mode == "task":
-        print(f"\nworking directory: {a.workdir if getattr(a, 'workdir', None) else '(temporary, removed; use --workdir to keep it)'}")
-        print("final variables: " + json.dumps({k: v for k, v in rr.values.items() if k not in a.task_inputs},
-                                               ensure_ascii=False, default=str)[:1000])
-    elif ok_produced:
-        print(f"\noutput: {kept if kept else f'{produced.name} in a temporary directory (use --keep to save it)'}")
-    else:
-        print(f"\noutput: no {produced.name} produced")
-    if verdict is not None:
-        ok, why = verdict
-        print(f"verdict: {'PASS' if ok else 'FAIL'}  {why}")
-        return 0 if ok else 1
-    print("verdict: not graded")
+    print(f"\nworking directory: {a.workdir if getattr(a, 'workdir', None) else '(temporary, removed; use --workdir to keep it)'}")
+    print("final variables: " + json.dumps({k: v for k, v in rr.values.items() if k not in a.task_inputs},
+                                           ensure_ascii=False, default=str)[:1000])
     return 1 if rr.error else 0
 
 

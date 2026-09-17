@@ -10,7 +10,7 @@
 
 [Why](#why-hexis) · [Installation](#installation) · [Quick start](#quick-start) · [Concepts](#concepts) ·
 [Updating](#updating-a-machine-with-a-model) · [Using a machine](#using-a-machine) · [CLI](#command-line-interface) ·
-[Evaluation](#evaluation) · [Development](#development) · [Citation](#citation)
+[Development](#development) · [Citation](#citation)
 
 </div>
 
@@ -45,8 +45,6 @@ This package accompanies the paper *Compiling Agent Skills into Extended Finite 
   interpreted execution of the skill, so a partially learned machine can still finish a task.
 - **Real tool backends.** OpenCode's native tools, a local `bash` backend, or tools that the model realizes from
   registry definitions.
-- **Evaluation harness.** Parallel comparison of machines with direct skill execution and memory baselines (Agent
-  Workflow Memory, ReasoningBank); graders for spreadsheet, multiple-choice and file-answer tasks; paired exact tests.
 - **Hermetic test suite.** More than 350 tests that need no network access, model endpoint or API key.
 
 ## How it works
@@ -76,23 +74,16 @@ Otherwise the update is retried once and the machine is kept.*
 
 ```bash
 pip install hexis-agent             # the package is imported as `hexis`; the command is `hexis-agent`
-pip install "hexis-agent[all]"      # with every optional extra
 pip install .                       # from a checkout; Python >= 3.11
+pip install -e ".[dev]"             # with pytest, build, twine and ruff for development
 ```
-
-| Extra | Adds | Needed for |
-|---|---|---|
-| `xlsx` | openpyxl | grading spreadsheet tasks |
-| `memory` | numpy, sentence-transformers | `hexis-agent memory index / precompute / retrieve` |
-| `dev` | pytest, build, twine, ruff | tests, linting and packaging |
 
 Running machines on real tasks also requires:
 
 | Requirement | Used for |
 |---|---|
 | An OpenAI-compatible chat endpoint | model calls (see [Configuration](#configuration)) |
-| [OpenCode](https://opencode.ai) on `PATH` | native tool execution and the skill-execution baseline (`--executor local` runs `bash` without it) |
-| LibreOffice (`soffice`) | recalculating spreadsheets before grading |
+| [OpenCode](https://opencode.ai) on `PATH` | native tool execution (`--executor local` runs `bash` without it) |
 
 ## Quick start
 
@@ -124,13 +115,13 @@ M="--model qwen3.6-flash --base-url https://your-endpoint/v1"
 # 1. compile a machine from the skill document
 hexis-agent compile --skill path/to/skill --out build/ $M
 
-# 2. collect traces (for example with `hexis-agent collect`) and fold them into the machine
+# 2. fold execution traces of the skill into the machine
 hexis-agent update --build build/ --traces traces/ --show 3    # preview: no model calls, nothing written
 hexis-agent update --build build/ --traces traces/ $M
 
 # 3. use the machine
 cat build/GUIDE.md                          # how the machine works; build/PROMPT.md is the agent prompt
-hexis-agent run --mode task --machine build/ --input request="..." --workdir work/ --executor local $M
+hexis-agent run --machine build/ --input request="..." --workdir work/ --executor local $M
 ```
 
 ## Concepts
@@ -200,7 +191,8 @@ Traces are JSON Lines files: a header with the task and its verdict, then one li
 {"kind": "end"}
 ```
 
-`hexis-agent collect` and `hexis-agent fold-traces` produce this format from OpenCode event streams.
+`hexis-agent run --json FILE` writes the trace of a run in this format, and `hexis.traces.trace_adapter.load_any_trace`
+also reads raw agent event logs.
 
 ### Skill rules
 
@@ -289,9 +281,9 @@ changed), it stops with exit status 2 without changing anything.
 
 - **Read the guide.** `GUIDE.md` lists the task inputs, the tools, a Mermaid diagram, every state with its prompt
   or tool call, the transitions in evaluation order, loop limits and fallback behaviour.
-- **Run it.** `hexis-agent run --mode task --machine BUILD --input KEY=VALUE ... --workdir DIR` runs the machine
-  on any inputs with the hexis runtime (`--executor local` runs `bash` in a subprocess, the default executor uses
-  OpenCode's tools). The benchmark modes `xlsx`, `livemath` and `filetask` also grade the result.
+- **Run it.** `hexis-agent run --machine BUILD --input KEY=VALUE ... --workdir DIR` runs the machine on any
+  inputs with the hexis runtime (`--executor local` runs `bash` in a subprocess, the default executor uses
+  OpenCode's tools); `--json FILE` saves the trace.
 - **Give it to an agent.** `PROMPT.md` is a system prompt that tells a tool-using agent (for example Claude Code
   or OpenCode) how to execute the machine state by state: the execution loop, variables, the guard language, the
   tools, every state and its transitions, the finishing report and the fallback procedure. `hexis-agent guide
@@ -308,13 +300,8 @@ write them automatically unless `--no-guide` is given.
 | `hexis-agent compile` | Initialize a machine from a skill document with a model, optionally fold in traces; writes a build directory |
 | `hexis-agent update` | Fold new traces into a build; a model (or a decisions file, or deterministic alignment) decides every step |
 | `hexis-agent guide` | Write `GUIDE.md` and `PROMPT.md` for a machine |
-| `hexis-agent run` | Execute a machine on one task (`task`, `xlsx`, `livemath` or `filetask` mode) |
+| `hexis-agent run` | Execute a machine on one task with inputs given on the command line |
 | `hexis-agent compile-stepwise` | Update a machine trace by trace with step decisions from a file (`--show`, `--apply`, `--report`) |
-| `hexis-agent collect` | Execute a skill with OpenCode on spreadsheet tasks and save traces |
-| `hexis-agent fold-traces` | Turn the skill-arm event streams of a benchmark run into traces |
-| `hexis-agent bench` | Run machine and skill-execution arms on a task set in parallel |
-| `hexis-agent memory` | Build Agent Workflow Memory workflows and ReasoningBank memories |
-| `hexis-agent summarize` | Compare arms on shared tasks: pass rate, time, tokens, paired exact tests |
 
 Run `hexis-agent <command> --help` for all options; `python -m hexis` is equivalent to `hexis-agent`.
 
@@ -329,47 +316,9 @@ Run `hexis-agent <command> --help` for all options; `python -m hexis` is equival
 | `.env` | Read from the working directory upward; variables already set in the environment take precedence |
 | `--temperature`, `--max-tokens`, `--llm-timeout`, `--llm-retries`, `--stream`, `--extra-body JSON` | Request settings for `compile` and `update` (`--extra-body` is merged into every request, e.g. `'{"enable_thinking": false}'`) |
 | `--no-think`, `--think-budget`, `--judge-think-budget` | Reasoning controls of `run` for Qwen-compatible endpoints |
-| `LABEL=self` | Memory baselines label trajectories by model self-judgement (`hexis-agent memory judge`) instead of the grader |
 
 See `.env.example` for a template. Exit statuses: 0 success, 2 usage, configuration or build problem, 3 model
 endpoint failure or interruption (progress is saved).
-
-## Evaluation
-
-`hexis-agent bench` runs arms on a task set: `fsm` (a compiled machine), `skill` (OpenCode with the skill in the
-system prompt), and `awm` / `rbank` (the skill arm with Agent Workflow Memory workflows or ReasoningBank memories
-placed before the prompt). Task files are YAML lists:
-
-```yaml
-- id: t1
-  turns: ["Compute the mean of column x in data.csv. Write @mean[value] to answer.txt."]
-  metadata:
-    verifier: dabench            # file-answer graders: dabench, sealqa_judge
-    answers: [[mean, "34.65"]]
-    assets: [data/data.csv]      # copied into the job directory; relative to --data-root
-```
-
-| Mode | Required metadata | Grading |
-|---|---|---|
-| `xlsx` | `init_asset`, `golden`, `answer_position` | SpreadsheetBench comparison after LibreOffice recalculation |
-| `livemath` | `answer` | last `\boxed{X}` in `answer.txt` |
-| `filetask` | `verifier`, `answers` or `answer`, `assets` or `assets_dir` + `assets_target` | `dabench`: `@name[value]` with the reference precision; `sealqa_judge`: recorded for an external judge |
-
-```bash
-hexis-agent bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
-    --arms fsm,skill --machine build/machine.json --skill path/to/skill --out runs/test
-
-# memory baselines built from a development run and frozen for the test run
-hexis-agent memory convert runs/dev dev_traj.jsonl
-hexis-agent memory awm dev_traj.jsonl workflows.txt
-hexis-agent memory rbank dev_traj.jsonl bank.jsonl
-hexis-agent memory index bank.jsonl
-hexis-agent memory precompute bank.jsonl tasks.yaml test_ids.txt rbank.json --mode filetask
-hexis-agent bench --mode filetask --tasks-file tasks.yaml --tasks t1,t2 --reps 1 \
-    --arms awm,rbank --awm-file workflows.txt --rbank rbank.json --skill path/to/skill --out runs/test
-
-hexis-agent summarize table.md "Test split" fsm=runs/test skill=runs/test awm=runs/test rbank=runs/test
-```
 
 ## Project layout
 
@@ -382,7 +331,6 @@ src/hexis/
 ├── llm/                  OpenAI-compatible client, endpoint configuration, model protocol
 ├── tools/                tool registries and backends (OpenCode, local subprocess, model-realized)
 ├── traces/               trace formats, normalization, phase classification, judging
-├── evaluators/           graders
 ├── examples/table_clean/ hermetic example skill
 ├── builddir.py           build directories
 ├── updater.py            the update loop shared by compile and update
@@ -403,12 +351,11 @@ tests/                    hermetic test suite (tests/legacy covers the legacy mo
 | `hexis.llm.llm_client` | OpenAI-compatible client (`client_from_env`) and `ModelAdapter` |
 | `hexis.tools.opencode_tools`, `hexis.tools.local_tools` | Tool backends |
 | `hexis.guide` | `render_guide`, `render_prompt`, `mermaid` |
-| `hexis.evaluators` | Graders |
 
 ## Development
 
 ```bash
-pip install -e ".[dev,xlsx]"
+pip install -e ".[dev]"
 pytest                                   # hermetic; OpenCode tests are skipped without the opencode executable
 ruff check src tests
 python -m build && twine check --strict dist/*
@@ -428,9 +375,8 @@ of the state it is executing. Review build directories and prompts before sharin
 
 ## License
 
-MIT (see [LICENSE](LICENSE)), except for the portions listed in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md): the spreadsheet comparison adapted from SpreadsheetBench
-(CC BY-SA 4.0) and the workflow-induction instruction adapted from Agent Workflow Memory (Apache-2.0).
+MIT (see [LICENSE](LICENSE)). See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for the programs and packages
+hexis works with.
 
 ## Citation
 
@@ -447,6 +393,4 @@ Citation metadata is also available in [CITATION.cff](CITATION.cff).
 
 ## Acknowledgements
 
-hexis builds on [SpreadsheetBench](https://github.com/RUCKBReasoning/SpreadsheetBench) for spreadsheet grading, on
-[Agent Workflow Memory](https://github.com/zorazrw/agent-workflow-memory) and ReasoningBank for the memory
-baselines, and on [OpenCode](https://opencode.ai) for tool execution.
+hexis uses [OpenCode](https://opencode.ai) for tool execution.

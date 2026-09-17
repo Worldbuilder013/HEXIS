@@ -65,40 +65,40 @@ def test_native_read_failure_is_not_reported_as_success(native, tmp_path):
     assert not out["ok"] and out["stderr"]
 
 
-def test_xlsx_entry_uses_native_tools_and_saves_trace(tmp_path, monkeypatch):
+def test_run_uses_native_tools_and_saves_trace(tmp_path, monkeypatch):
     if not shutil.which("opencode"):
         pytest.skip("OpenCode binary required")
     import json
 
-    from hexis.cli import run as run_fsm
+    from hexis.cli import run as run_cli
     from hexis.machine.schema import EndAction, Machine, State, Terminal, ToolAction, Transition, Variable
 
     m = Machine(skill_id="native-smoke", initial="copy", fallback="FALLBACK", variables=[
         Variable(name="input_path", init_from="task.input.input_path"),
         Variable(name="output_path", init_from="task.input.output_path")],
         states={"copy": State(id="copy", action=ToolAction(name="bash", input={
-            "command": 'cp "${input_path}" "${output_path}"', "description": "Copy input workbook"},
+            "command": 'cp "${input_path}" "${output_path}"', "description": "Copy the input file"},
             writes=["stdout", "returncode"]), transitions=[Transition(to="end")]),
             "end": State(id="end", action=EndAction(terminal="done")),
             "FALLBACK": State(id="FALLBACK", action=EndAction(terminal="done"))},
         terminals=[Terminal(id="done")])
     machine = tmp_path / "machine.json"
     machine.write_text(m.model_dump_json(by_alias=True))
-    source = tmp_path / "source.xlsx"
+    source = tmp_path / "source.bin"
     source.write_bytes(b"native execution smoke payload")
     (tmp_path / "SKILL.md").write_text("Copy the input file.")
+    target = tmp_path / "work" / "copy.bin"
 
     @contextmanager
     def no_inference(**_kwargs):
         yield SimpleNamespace(model="unused", base_url="local-test")
 
-    monkeypatch.setattr(run_fsm, "client_from_env", no_inference)
-    args = SimpleNamespace(machine=str(machine), fallback=False, skill=str(tmp_path), prompt="copy",
-        workbook=str(source), model="", provider="default", max_steps=8, keep=str(tmp_path / "kept.xlsx"),
-        golden=None, answer_position=None, quiet=True, json=str(tmp_path / "trace.jsonl"),
-        opencode_bin="opencode", tool_timeout=30)
-    assert run_fsm.run_machine(args) == 0
-    assert Path(args.keep).read_bytes() == source.read_bytes()
+    monkeypatch.setattr(run_cli, "client_from_env", no_inference)
+    args = SimpleNamespace(machine=str(machine), skill=str(tmp_path), model="", provider="default", max_steps=8,
+        task_inputs={"input_path": str(source), "output_path": str(target)}, workdir=str(tmp_path / "work"),
+        quiet=True, json=str(tmp_path / "trace.jsonl"), opencode_bin="opencode", tool_timeout=30)
+    assert run_cli.run_machine(args) == 0
+    assert target.read_bytes() == source.read_bytes()
     records = [json.loads(line) for line in Path(args.json).read_text().splitlines()]
     assert any(r.get("action", {}).get("name") == "bash" for r in records)
 

@@ -4,7 +4,7 @@
 
 ```bash
 python -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev,xlsx]"
+pip install -e ".[dev]"
 pytest
 ruff check src tests
 ```
@@ -20,8 +20,7 @@ The package is `hexis` (distribution and command `hexis-agent`):
 - `hexis.compiler`: compile context, initialization, trace normalization, alignment, candidate construction,
   checks and replay, update, stepwise decisions.
 - `hexis.execution`: the runtime interpreter.
-- `hexis.llm`, `hexis.tools`, `hexis.traces`, `hexis.evaluators`: model access, tool backends, trace formats,
-  graders.
+- `hexis.llm`, `hexis.tools`, `hexis.traces`: model access, tool backends, trace formats.
 - `hexis.builddir`, `hexis.updater`, `hexis.step_judge`, `hexis.guide`: build directories, the update loop, the
   model decider and the usage guides.
 - `hexis.legacy`: modules of an earlier compiler iteration. The command-line interface does not import them; do

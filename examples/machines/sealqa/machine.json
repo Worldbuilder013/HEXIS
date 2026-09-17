@@ -1,0 +1,1069 @@
+{
+  "format": "efsm-v1",
+  "skill_id": "sealqa",
+  "version": "0.2.0",
+  "initial": "s1",
+  "fallback": "FALLBACK",
+  "max_steps": 80,
+  "states": {
+    "s1": {
+      "id": "s1",
+      "clause": "S4",
+      "action": {
+        "kind": "model",
+        "prompt": "Classify the question before searching, and rewrite its target as a schema. The request states the question, that the evidence is the local page files in docs_dir, and the date to treat as today. First apply the literal gate: if the question is pure math or logic, or rests on a false or impossible premise, it must be answered literally without repairing it into a nearby common question; set gate to 'direct' and put the literal answer and its reason in schema, but the pages are still opened once to verify it, because an answer from memory is never final. Otherwise set gate to 'search'. premise_check (always written, also for math and logic questions): every presupposition the question makes, including the exact object asked for read word by word (a 'cube number' that is a sum of two cubes is a different object from a number that is a sum of two cubes; a 'perfect square' that is prime is a different object from a prime), (that an event exists in the stated year, that a person holds the stated title, that an object with the stated properties exists) written out as a claim to be confirmed or refuted from the pages; a question whose presupposition is false or whose object cannot exist is answered by stating that the presupposition does not hold, not by answering the nearest famous question that the wording resembles. Write schema as plain text with these labeled parts. type: one of exact lookup; current/latest/last/first entity; count/list filtering; ranking or superlative; threshold/window; table/data extraction; derived calculation. answer_type_and_unit: the expected answer type, unit, and whether an exact value is required. ordinal_reading: a literal paraphrase of the ordinal and temporal words of the question, because they select different items: 'first X since Y' is the earliest qualifying item after Y, not the most recent one; 'last' or 'latest' is the most recent completed item; 'previously' or 'former' points before the current holder; 'most recent to do Z' is chosen among all who did Z by date; when the question nests a qualifier inside another ('the first X in the most recent Y', 'the last Z of the current W'), the outer temporal qualifier is resolved first against the evaluation date (the most recent Y is the latest Y that had begun by that date, found from the newest dated pages), and the inner ordinal is then applied within it; the paraphrase names the selection rule that the answer must satisfy. time_anchor: the evaluation date from the request, and for words like current, latest, last, since, oldest: which date field decides, whether boundaries are inclusive, and that future or scheduled items are excluded unless asked. population: for superlatives, counts, thresholds and records, the eligible population exactly as worded, with inclusion and exclusion rules, listing every restrictive qualifier in the question as its own filter (continuous, single, solely, non-brand, nominal, regular season, worldwide, in a single day), because each one changes the answer and the popular reading of the question usually drops one of them; for an award record the population is every credited recipient of that category (producers, engineers, mixers, songwriters as well as performers) unless the question restricts it to artists, and the schema says which reading the wording supports; for counts, players versus games and released versus planned are distinguished. search_terms: short concrete tokens likely to appear in a table row or sentence of a page (entity names, years, numbers, units, category words), never the whole question. Return exactly one JSON object {\"gate\": \"direct|search\", \"schema\": \"...\"}.",
+        "reads": [
+          "request",
+          "docs_dir"
+        ],
+        "writes": [
+          "gate",
+          "schema"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "gate == 'search'",
+          "to": "s2",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s2": {
+      "id": "s2",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cd \"${docs_dir}\" && for f in $(ls *.txt | sort -V); do printf '%s | %s bytes | ' \"$f\" \"$(wc -c < \"$f\" | tr -d ' ')\"; head -n 3 \"$f\" | tr '\\n' ' ' | cut -c1-260; echo; done"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "index"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "index"
+        }
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s3": {
+      "id": "s3",
+      "clause": "S3",
+      "action": {
+        "kind": "model",
+        "prompt": "Open sources. index lists every local page file with its size and its TITLE / URL / DATE header; opened lists the files already opened in full; evidence is the ledger so far ('none' on the first round). Write grep_pattern: 'none' when the pages to open are already clear from index or evidence (then no search is run this round), otherwise an extended regular expression (alternatives separated by |, case-insensitive) made of short concrete tokens that would appear in a table row or sentence of a page: entity names, surnames, years, numbers, units, category words from the schema's search_terms; never the whole question, never a long phrase. Write open_file: the exact name (for example doc_06.txt) of ONE file from index to print in full now, chosen in the skill's source order: a page whose TITLE names the list, ranking, record, table or official body the question is about outranks every other page; then an official owner source, then a structured maintained table or reference list, then a reputable secondary source, and a forum, fan wiki or Q&A page last; a file already in opened is never chosen again (a choice of an opened file is replaced by the next step with the unopened file that has the most grep hits); when evidence names what is missing and which titles or grep hits point to it, choose that file; when the previous grep hits showed which files mention the entities, prefer the file with the most relevant hits that is not yet opened; for a count, list, threshold, ranking or record question the decisive page is the maintained list or ranking of the population itself, and it must be opened before concluding. Return exactly one JSON object {\"grep_pattern\": \"...\", \"open_file\": \"doc_XX.txt\"}.",
+        "reads": [
+          "request",
+          "schema",
+          "index",
+          "evidence",
+          "opened",
+          "open_count"
+        ],
+        "writes": [
+          "grep_pattern",
+          "open_file"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "open_count >= 8",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s3c",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s3c": {
+      "id": "s3c",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "OP=$(cat <<'__T__'\n${opened}\n__T__\n); OF=$(cat <<'__T__'\n${open_file}\n__T__\n); GO=$(cat <<'__G__'\n${grep_out}\n__G__\n); IX=$(cat <<'__I__'\n${index}\n__I__\n); OF=$(printf '%s' \"$OF\" | tr -d '[:space:]'); is_open() { printf '%s\\n' \"$OP\" | grep -qx -- \"$1\"; }; CH=\"\"; if [ -n \"$OF\" ] && ! is_open \"$OF\" && [ -f \"${docs_dir}/$OF\" ]; then CH=\"$OF\"; NOTE=\"ok: $OF\"; fi; if [ -z \"$CH\" ]; then for f in $(printf '%s\\n' \"$GO\" | sed -n '/HITS PER FILE/,/MATCHING LINES/p' | grep -E '^doc_[0-9]+\\.txt:[0-9]+$' | sort -t: -k2 -nr | cut -d: -f1); do if ! is_open \"$f\"; then CH=\"$f\"; NOTE=\"substituted (choice '$OF' was already opened or invalid): $f, the unopened file with most grep hits\"; break; fi; done; fi; if [ -z \"$CH\" ]; then for f in $(printf '%s\\n' \"$IX\" | grep -oE '^doc_[0-9]+\\.txt'); do if ! is_open \"$f\"; then CH=\"$f\"; NOTE=\"substituted (choice '$OF' was already opened or invalid): $f, the first unopened file in index\"; break; fi; done; fi; if [ -z \"$CH\" ]; then exit 1; fi; printf '%s' \"$CH\""
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "open_file"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "open_file"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0 and grep_pattern == 'none'",
+          "to": "s4b",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        },
+        {
+          "if": "returncode == 0 and grep_pattern != 'none'",
+          "to": "s4",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        },
+        {
+          "if": "",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        }
+      ],
+      "origin": "compiler",
+      "locator": ""
+    },
+    "s4": {
+      "id": "s4",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cd \"${docs_dir}\" && PAT=$(cat <<'__T__'\n${grep_pattern}\n__T__\n); echo \"=== HITS PER FILE (file:count) for pattern: $PAT ===\"; grep -c -i -E -- \"$PAT\" *.txt 2>/dev/null | grep -v ':0$' | sort -t: -k2 -nr | head -30; echo \"=== MATCHING LINES (file:line:text, first 120) ===\"; grep -n -i -E -- \"$PAT\" *.txt 2>/dev/null | cut -c1-220 | head -120; echo \"=== END ===\""
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "grep_out"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "grep_out"
+        }
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s4b",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s4b": {
+      "id": "s4b",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "OF=$(cat <<'__T__'\n${open_file}\n__T__\n); OF=$(printf '%s' \"$OF\" | tr -d '[:space:]'); F=\"${docs_dir}/$OF\"; if [ ! -f \"$F\" ]; then echo \"NO SUCH FILE: $OF\" >&2; exit 1; fi; echo \"===== $OF ($(wc -c < \"$F\" | tr -d ' ') bytes) =====\"; head -c 60000 \"$F\"; echo; echo \"===== END OF $OF =====\""
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "page_text",
+          "page_err"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "page_text",
+          "stderr": "page_err"
+        }
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s4c",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s4c": {
+      "id": "s4c",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "OP=$(cat <<'__T__'\n${opened}\n__T__\n); OF=$(cat <<'__T__'\n${open_file}\n__T__\n); printf '%s\\n%s\\n' \"$OP\" \"$OF\" | grep -v '^none$' | awk 'NF' | awk '!seen[$0]++'"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "opened"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "opened"
+        }
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s5",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        }
+      ],
+      "origin": "compiler",
+      "locator": ""
+    },
+    "s5": {
+      "id": "s5",
+      "clause": "S4",
+      "action": {
+        "kind": "model",
+        "prompt": "Extract the evidence of this round. grep_out lists, across all local pages, how many lines each file matches grep_pattern and the first matching lines (file:line:text), or 'none' when no search was run; page_text is the full text of the page open_file just opened (its first lines are TITLE, URL and DATE); page_err is non-empty only when it could not be read; evidence is the ledger accumulated from earlier rounds (read it, do not rewrite it); opened lists the files opened so far. Write new_findings for THIS page only, as plain text with these labeled parts, to be appended to the ledger: source: the file name, its TITLE, URL and DATE, and its tier (official owner source; structured maintained table or reference list; reputable secondary; community or fan wiki; forum or Q&A; snippet-like), noting the page date relative to the time anchor. rows: for a question about a person's or entity's current age, tenure or span, every row also carries the birth date (or start date) quoted from the page as its own field, distinct from the date of any event or title, because the age is computed from it later; for a count, list, threshold, ranking, superlative or ordinal question, EVERY candidate row this page holds, transcribed one per line as candidate | value or score | date | category or qualifier | include or exclude with the reason | verified (a row is verified when it stands in this page's body or table, never from a title or memory); a page that lists the population is transcribed row by row, never summarized; when the page holds no relevant row write 'rows: none'. facts: for a lookup or calculation question, each relevant fact with the passage quoted briefly and which part of the schema it supports; 'facts: none' is allowed only when the page mentions none of the schema's entities; when it mentions them, at least every sentence carrying a year, number, date or ordinal about them is quoted (a page about one edition of an award states which edition it is and how many there were; a page about a person states dates); a fact is dated by the page's DATE or the latest date the text mentions, and a newer page's figure supersedes an older page's. premise: for each claim in the schema's premise_check whether this page confirms it, refutes it, or is silent, quoting the passage; a claim is confirmed only by wording that matches the question as written (the same competition, year, place), and a page stating that the object no longer exists refutes it; silence is neither. conflicts: where this page disagrees with earlier findings in evidence and which source directly defines the eligible population. hits: which files grep_out shows matching and for which tokens, so the next round can open the most promising unopened file. missing: what the schema still needs and which unopened file (by exact name from index titles or from hits) is likely to hold it, or 'none'. Then decide next: 'open' if a needed value, candidate, date or population fact is still unverified and any file that could hold it has not been opened yet (hits and titles never show that the pages lack a figure; the file whose TITLE names the list, ranking, record or official body the question is about must have been opened in full before concluding); 'conclude' only if the ledger plus this page hold the rows or facts that decide the answer, quoted with values and dates from opened page bodies, at least one further page has been opened as a sanity check, and at most two more pages to disprove the answer have been spent; or if every plausibly relevant file has been opened; or if open_count has reached 8. For a count, ranking, threshold, superlative or ordinal question the ledger must hold transcribed rows before 'conclude'. Return exactly one JSON object {\"new_findings\": \"...\", \"next\": \"open|conclude\"}.",
+        "reads": [
+          "request",
+          "schema",
+          "grep_out",
+          "page_text",
+          "page_err",
+          "evidence",
+          "opened",
+          "open_count"
+        ],
+        "writes": [
+          "new_findings",
+          "next"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s5b",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s5b": {
+      "id": "s5b",
+      "clause": "S4",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "EV=$(cat <<'__E__'\n${evidence}\n__E__\n); NF=$(cat <<'__N__'\n${new_findings}\n__N__\n); OF=$(cat <<'__T__'\n${open_file}\n__T__\n); { if [ \"$EV\" != \"none\" ]; then printf '%s\\n' \"$EV\"; fi; printf '\\n=== page %s: %s ===\\n%s\\n' \"${open_count}\" \"$OF\" \"$NF\"; }"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "evidence"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "evidence"
+        }
+      },
+      "transitions": [
+        {
+          "if": "open_count < 1",
+          "to": "s3",
+          "inc": "open_count",
+          "support": 0,
+          "origin": "compiler"
+        },
+        {
+          "if": "open_count >= 1 and next == 'open'",
+          "to": "s3",
+          "inc": "open_count",
+          "support": 0,
+          "origin": "compiler"
+        },
+        {
+          "if": "",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        }
+      ],
+      "origin": "compiler",
+      "locator": ""
+    },
+    "s6": {
+      "id": "s6",
+      "clause": "S5",
+      "action": {
+        "kind": "model",
+        "prompt": "Derive the answer deterministically. open_count is the number of pages opened out of 8; at 8 no more evidence will arrive, so the answer must be the best supported concrete value in evidence now. When sources conflict, the official or reputable source outranks a fan wiki, forum or snippet, and a candidate supported only by the latter is dropped. evidence is a ledger of per-page blocks ('=== page k: file ===' followed by source, rows, facts, premise, conflicts); the same entity may appear in several blocks and is counted once, and a newer page's figure supersedes an older one. From schema and evidence write answer_draft: the concise final answer in the form the request asks for (a name, a number, a date or a short phrase) and of the answer type in schema; a placeholder word such as unknown, TBD, N/A or unavailable, or a sentence saying that the data is not available, is never an answer, since the benchmark scores only a concrete value: when nothing is fully verified, the best supported candidate or the figure closest to the question is given, matching the exact wording of the question rather than a nearby common question, and allowing 'none' or a contradiction of the premise only when the evidence positively shows the premise false (a page contradicts it), and never because the wording is loose while its intended reading is evident; when the pages are merely silent about the premise, it is unverified, not refuted, and the answer is still the best supported concrete value rather than a claim that the thing does not exist; in which case the answer is a short statement of what does not hold (for example that no such event takes place in that year), not the answer to the repaired question; when the evidence merely fails to rank or complete the candidates, the answer is the best supported candidate, stated, not 'none'; when no candidate row was verified but a page states a figure for the asked quantity, that figure (from the newest such page) is the answer and its date is noted. Write calc_cmd: ONE shell command whose stdout is exactly the final answer line (it prints to stdout and writes no file; the answer file is written in a later step from this output): for a question that asks which items satisfy one condition but not another (required in X but not in Y, in list A but absent from list B), the candidate table carries one column per condition and the answer is the row-wise difference or intersection computed explicitly, never a list of everything in the first condition; for counts, list the included candidates from evidence one per line and count them with sort -u | wc -l or python len(set(...)), taking only rows whose quoted date lies inside the window, whose verification comes from an official, maintained or reputable page, and which satisfy every qualifier of the population (an incumbent is not a 'former' holder, a brand is not a person, a planned item is not a released one), and leaving out rows supported only by a forum, fan wiki or social post or lacking a date; for derived values (age, rate, total, percentage, date window) write the formula with the source values in python or shell arithmetic and print the result in the requested unit and rounding; a 'current age' or 'age today' is computed with python date arithmetic from the full birth date quoted in the ledger to the evaluation date in schema's time_anchor, never copied from a page that states an age at some other moment (the age at which a title was earned, an age printed on a dated article), and the same holds for 'how long ago', 'years since' and similar spans, which run to the evaluation date; for a ranking, superlative or ordinal question (highest, most, first, last, latest, second), type the candidate rows from the ledger into the script as literals (never read evidence.json, the ledger or any file: the script's only inputs are the values written in it) as a python list of tuples (name, value or score, date, qualifies) where qualifies is True only when the row satisfies every qualifier of the population as the ledger records it, filter on qualifies, choose by max, min or date order as the ordinal_reading in schema says, and print the requested field of the chosen row; only for a plain lookup with a single fact and no competing rows, print the answer string with printf. A calc_cmd that merely prints a value with printf for a count, ranking, superlative or ordinal question is not a derivation and is rejected twice (calc_err says REJECTED); after that the best supported concrete value is accepted, so the third attempt must at least print a concrete value, never a placeholder. If audit_note is not 'none' and not 'ok', the previous answer was rejected for the reason stated there: correct exactly that point; if it says the page budget is spent, no further evidence will come, and the answer is the best supported concrete value from what evidence holds (the figure or candidate closest to the question, with the newest date), never a placeholder. If calc_err is not 'none' and shows an error, fix exactly that cause. Return exactly one JSON object {\"answer_draft\": \"...\", \"calc_cmd\": \"<the command>\"}.",
+        "reads": [
+          "request",
+          "schema",
+          "evidence",
+          "audit_note",
+          "calc_err",
+          "open_count"
+        ],
+        "writes": [
+          "answer_draft",
+          "calc_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "calc_count >= 3",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "calc_count < 3 and audit_count >= 3",
+          "to": "s9",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s7": {
+      "id": "s7",
+      "clause": "S5",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "SCH=$(cat <<'__S__'\n${schema}\n__S__\n); CMD=$(cat <<'__C__'\n${calc_cmd}\n__C__\n); if [ \"${calc_count}\" -lt 2 ] && printf '%s' \"$SCH\" | grep -q -i -E 'type:[^;]*(count|list|threshold|ranking|superlative|ordinal)' && printf '%s' \"$CMD\" | grep -q -E '^[[:space:]]*(printf|echo)[[:space:]]'; then echo 'REJECTED: for a count, list, threshold, ranking or ordinal question the answer must be computed from the ledger rows in the script (a python list that is filtered and counted or compared), not printed as a bare value'; exit 1; fi; bash -c \"$CMD\""
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "calc_out",
+          "calc_err"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "calc_out",
+          "stderr": "calc_err"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s6",
+          "inc": "calc_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s8": {
+      "id": "s8",
+      "clause": "S4",
+      "action": {
+        "kind": "model",
+        "prompt": "Run the final audit before any file is written. open_count is the number of pages already opened out of 8; when it is 8 or more, no further evidence can be gathered, and the only admissible objections are those the derivation can fix from the evidence at hand. calc_out is the computed answer line and answer_draft the intended answer. Check against request, schema and evidence: the answer matches the exact wording, not a nearby common question, and in particular satisfies every qualifier listed under population and the ordinal_reading in schema, the ordinal having been chosen by date from a candidate table that covers the whole history rather than from a headline about one occurrence (the earliest item after Y for 'first since Y', the most recent for 'latest', an item before the current holder for 'previously'); every candidate that determines the answer was verified from an opened page body or table, not from a title or memory, and every row counted satisfies each qualifier of the population (a row the evidence itself labels incumbent, planned, brand or excluded cannot be counted); no stale or approximate wording was used where an exact current value was asked; the requested date, year or event window and the eligible population were applied; each claim under premise_check was confirmed, refuted or left open by the evidence, and a refuted claim or an impossible object makes the answer a statement of the impossibility rather than a value; a premise the pages are silent about is unverified and does not license an answer that the thing does not exist; an evidence note that reads the question differently from its wording (a supposed typo, a nearby competition or entity) or that sets aside a closure or cancellation notice means the premise was not confirmed, and the answer must state what does not hold; the possibility that the answer is none, no one, does not exist, or a false premise was considered, and an answer of 'none' is accepted only with positive evidence that the premise is false; for a current or latest question the figure comes from the newest dated page in evidence; a current age or a span to today was computed to the evaluation date from a birth or start date, not copied from a page that states an age at another moment; calc_out equals answer_draft in substance and is short and in the requested format. For a count, ranking, superlative or ordinal question the calculation must have been made over the ledger rows (a list filtered and counted, or compared by max, min or date), not a printf of the chosen value; a bare printed value for such a question is 'revise_answer' with the note naming the rows to compute over. The evidence ledger must contain the rows that decide the answer, quoted from opened pages with their values and dates (for a ranking or superlative question every candidate row that competes, for a count every included row, for an ordinal the dated list); a ledger whose findings or candidates read 'none', or that only summarizes a page ('lists all finals') without its rows, cannot support any answer. Decide audit: 'pass' if all hold and the answer is a concrete value of the schema's type (a placeholder such as unknown, TBD or N/A is 'revise_answer'); 'revise_answer' if the evidence supports a different or differently formatted answer or calc_out and answer_draft disagree; 'more_evidence' whenever the objection is that a determining fact or the deciding rows are missing from the evidence and page budget remains (the audit_note then names the file from index that should be opened), since asking for a revised answer cannot supply a missing fact; a statement that data is unavailable is a placeholder and never the requested revision; when open_count is 8 or more the audit_note begins with 'page budget spent' and names the best supported concrete value visible in the evidence (or the candidate closest to the question) that the derivation step must now return. Write audit_note as one or two sentences naming the exact problem and the required change, or 'ok' when passing. Return exactly one JSON object {\"audit\": \"pass|revise_answer|more_evidence\", \"audit_note\": \"...\"}.",
+        "reads": [
+          "request",
+          "schema",
+          "evidence",
+          "answer_draft",
+          "calc_out",
+          "open_count"
+        ],
+        "writes": [
+          "audit",
+          "audit_note"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "audit == 'pass'",
+          "to": "s9",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "audit == 'revise_answer' and audit_count < 3",
+          "to": "s6",
+          "inc": "audit_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "audit == 'more_evidence' and open_count < 8",
+          "to": "s3",
+          "inc": "open_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "audit == 'more_evidence' and open_count >= 8 and audit_count < 3",
+          "to": "s6",
+          "inc": "audit_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s9",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s9": {
+      "id": "s9",
+      "clause": "S4.38",
+      "action": {
+        "kind": "model",
+        "prompt": "calc_out is the stdout of the calculation and answer_draft the intended answer. Write final_line: the single final answer line to be stored in the answer file, taken from calc_out when it is a concrete answer, otherwise from answer_draft; a concise value only (a name, a number, a date or a short phrase), no explanation, no quotes around it, no placeholder such as N/A or unknown. If read_err is not 'none' or edit_log shows an error, the previous write failed; the line itself is unchanged unless it was wrong. Return exactly one JSON object {\"final_line\": \"...\"}.",
+        "reads": [
+          "calc_out",
+          "answer_draft",
+          "edit_log",
+          "read_err"
+        ],
+        "writes": [
+          "final_line"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "write_count >= 3",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "write_count < 3 and repair_count >= 2",
+          "to": "s13",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s10",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s10": {
+      "id": "s10",
+      "clause": "S4.38",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cat > \"${output_path}\" <<'__ANSWER__'\n${final_line}\n__ANSWER__"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "edit_log"
+        ],
+        "phase": "apply",
+        "labels": [],
+        "binds": {
+          "stdout": "edit_log"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s11",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s9",
+          "inc": "write_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s11": {
+      "id": "s11",
+      "clause": "S4.38",
+      "action": {
+        "kind": "tool",
+        "name": "read",
+        "input": {
+          "filePath": "${output_path}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "file_content",
+          "read_err"
+        ],
+        "phase": "probe",
+        "labels": [
+          "verify"
+        ],
+        "binds": {
+          "stdout": "file_content",
+          "stderr": "read_err"
+        }
+      },
+      "transitions": [
+        {
+          "if": "repair_count >= 2",
+          "to": "s13",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "repair_count < 2 and returncode == 0",
+          "to": "s12",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s9",
+          "inc": "write_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s12": {
+      "id": "s12",
+      "clause": "S4.38",
+      "action": {
+        "kind": "judge",
+        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes each line with its line number and a colon, and appends an '(End of file - total N lines)' footer; none of that framing is file content. Answer 'pass' if the content is exactly the single answer line final_line and nothing else of substance. Answer 'wrong_content' if the line differs, there is extra content, the file is empty, or the line is a placeholder such as '(no output)', 'unknown', 'TBD' or 'N/A' rather than an answer. Answer '弃权' if file_content is unreadable.",
+        "reads": [
+          "file_content",
+          "final_line",
+          "answer_draft"
+        ],
+        "writes": [
+          "verify_verdict"
+        ],
+        "labels": [
+          "pass",
+          "wrong_content",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "verify_verdict == 'pass'",
+          "to": "s14",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == 'wrong_content' and repair_count < 2",
+          "to": "s9",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "to": "s11",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s13",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s13": {
+      "id": "s13",
+      "clause": "S4.38",
+      "action": {
+        "kind": "model",
+        "prompt": "The answer file could not be verified after the allowed repairs. Report honestly what was written according to edit_log and file_content, state the intended answer from calc_out, and say explicitly that the result is UNVERIFIED. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "edit_log",
+          "file_content",
+          "calc_out"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_UNVERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s14": {
+      "id": "s14",
+      "clause": "S4.38",
+      "action": {
+        "kind": "model",
+        "prompt": "Report the result: state that the answer file at output_path was written and read back, quote its content, and summarize in two sentences which opened sources in evidence support it. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "file_content",
+          "evidence"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_VERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_VERIFIED": {
+      "id": "END_VERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_VERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_UNVERIFIED": {
+      "id": "END_UNVERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_UNVERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "FALLBACK": {
+      "id": "FALLBACK",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_FALLBACK"
+      },
+      "transitions": [],
+      "origin": "compiler",
+      "locator": ""
+    }
+  },
+  "variables": [
+    {
+      "name": "request",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.request"
+    },
+    {
+      "name": "output_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.output_path"
+    },
+    {
+      "name": "docs_dir",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.docs_dir"
+    },
+    {
+      "name": "work_dir",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.work_dir"
+    },
+    {
+      "name": "gate",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "schema",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "index",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "grep_pattern",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "open_file",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "grep_out",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "page_text",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "page_err",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "evidence",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "opened",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "next",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "answer_draft",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "calc_cmd",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "calc_out",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "calc_err",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "audit",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "audit_note",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "final_line",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "edit_log",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "file_content",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "read_err",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "verify_verdict",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "result",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "ok",
+      "type": "boolean",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "returncode",
+      "type": "integer",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stdout",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stderr",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "open_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "calc_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "audit_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "write_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "repair_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "new_findings",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    }
+  ],
+  "terminals": [
+    {
+      "id": "END_VERIFIED",
+      "kind": "verified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_UNVERIFIED",
+      "kind": "unverified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_FALLBACK",
+      "kind": "fallback",
+      "output": []
+    }
+  ],
+  "prohibitions": [],
+  "thresholds": {
+    "min_support": 2,
+    "holdout_ratio": 0.2,
+    "acc_thr": 0.9,
+    "retry_budget": 3,
+    "loop_margin": 1.5,
+    "fallback_rate_target": 0.15,
+    "judge_rewrite_max": 2,
+    "judge_err_max": 0.2
+  },
+  "audit_tools": [],
+  "phase_rules": "default"
+}

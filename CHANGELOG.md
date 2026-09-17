@@ -24,6 +24,8 @@ Initial release.
 - `hexis-agent run`: run any machine on inputs given with `--input KEY=VALUE` in a kept `--workdir`; `--machine`
   accepts a build directory.
 - Tool backends: OpenCode native tools, a local `bash` subprocess, and model-realized tools defined in a registry.
+- Example machines compiled from four skills (data analysis, mathematics, question answering over a corpus,
+  spreadsheet editing) in `examples/machines/`, each with its `GUIDE.md`.
 - All messages, reports, prompts and documentation are in English. The abstain label of judge actions is
   `abstain`; machines that use the label of earlier versions still load and run. Recompiling a skill therefore
   shows models English text where earlier versions did not.

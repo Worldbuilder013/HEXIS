@@ -1,0 +1,759 @@
+{
+  "format": "efsm-v1",
+  "skill_id": "dabench",
+  "version": "0.1.0",
+  "initial": "s1",
+  "fallback": "FALLBACK",
+  "max_steps": 60,
+  "states": {
+    "s1": {
+      "id": "s1",
+      "clause": "S1",
+      "action": {
+        "kind": "model",
+        "prompt": "The request is a data analysis question about one data file. The command runs inside the working directory that holds that file, so open it by the relative file name the request states (for example pd.read_csv('./name.csv')); never write an absolute path. (The absolute path is also exported to the shell as DATA_PATH; using it from python needs import os first.) Before designing anything, assess the data structure the request depends on. Write inspect_cmd: ONE shell command that runs python3 with pandas on that file and prints what an analyst needs in order to plan this request: the column names and dtypes, the row count, missing values per column, a few sample rows with every column shown but each cell cut to about 80 characters (a long free-text cell must not flood the output), and for every column the request mentions: a numeric column's range, and a text column's raw values as they are written, showing both the most frequent values and a few of the longest or most complex ones, so that any embedded ranges, brackets, separators, units or footnotes become visible; and for every column the request filters or groups on, its distinct values with counts, so that a value named in the request (a source, a class, a region) can be matched to how it is actually written in the data. Keep the output small (use head, limit value_counts to a few rows) but never let the display hide how values are written. Write the command as a python script fed through a quoted heredoc (python3 - <<'EOF' ... EOF), never as a python3 -c one-liner, so that quotes inside the script cannot break the shell. Print the general profile (shape, dtypes, missing counts, sample rows) before anything column-specific, so that partial output survives a later error. Do not assume any column name: resolve every column the request mentions against df.columns at run time (exact, then case-insensitive, then substring match), print which column each mention resolved to, and skip a mention that matches nothing instead of raising, so that one unmatched name cannot abort the profile. If inspect_err is not 'none', the previous command failed with that error: fix exactly that cause. Return exactly one JSON object {\"inspect_cmd\": \"<the command>\"}.",
+        "reads": [
+          "request",
+          "inspect_err"
+        ],
+        "writes": [
+          "inspect_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "inspect_count >= 3",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s2",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s2": {
+      "id": "s2",
+      "clause": "S1",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cd \"${work_dir}\" && export DATA_PATH=\"${data_path}\" WORK_DIR=\"${work_dir}\"; ${inspect_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "data_profile",
+          "inspect_err"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "data_profile",
+          "stderr": "inspect_err"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s1",
+          "inc": "inspect_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s3": {
+      "id": "s3",
+      "clause": "S1",
+      "action": {
+        "kind": "model",
+        "prompt": "Design the computation. From request and data_profile write plan as plain text with these labeled parts. target: exactly which quantities the request asks for, and the exact name and format each one must be reported in, copied from the request's answer format. interpretation: how each quantity the request names maps onto a column by meaning and unit, not by name resemblance alone (a duration is a time span such as a duration column or end minus start, a count is a count, a price is a price); when several columns could fit, the plan names the candidates from data_profile and says why the others are rejected; then how each constraint of the request maps onto the data (when the narrative part of the request and its Constraints section word a boundary or detail differently, the Constraints wording governs, and a boundary is taken literally: 'beyond 2000' excludes 2000 while '2000 and beyond' includes it; the plan quotes the governing phrase): which columns, which filters (a value the request names must be matched to the way it is written in data_profile, such as a different case, hyphenation or abbreviation, and the plan states the matched value; when the profile does not show it, the plan says so and the checks must report the number of rows the filter keeps), which grouping, which method or library call (when the request asks to predict or model a target without naming the predictors, the predictor set is every other column of the file, encoded where categorical, less any feature the request says to add or remove, rather than a hand-picked subset; an encoding the request asks for without stating the mapping (a text column to 0/1 or to integer codes) follows pandas' default categorical order, the sorted distinct values numbered from 0, and the plan states the mapping; a statistic whose definition has variants is computed the way pandas computes it by default unless the request says otherwise: standard deviation and variance with ddof=1 (sample) unless the request says population or names numpy, and the plan states the ddof used; a method the request names, such as a named coefficient, test or estimator, is taken by its literal textbook definition, and the plan writes that definition out so that a similarly named variant is not substituted), which parameters (random_state, split sizes, encoding, rounding; a seed the request fixes for reproducibility is passed to every randomized component, the split and any estimator with a random_state, not only to the one step it is mentioned under); for a text column that must become numeric, the parsing rule derived from the raw values in data_profile (strip embedded ranges, brackets, separators or units before converting) so that every non-empty value converts, since a conversion that turns non-empty text into missing is a parsing failure and not missing data; and how missing values are treated: keep every row of the file unless the request says to drop or filter rows; a row whose missing value sits in a numeric column that the statistic or model actually uses is dropped only when the request says to exclude or ignore such records or when the method cannot take it (a regression on that column), otherwise it is kept; a missing value in a categorical column that is being encoded is left to the encoding and its row is kept; state the choice; when the request lists processing steps, they apply in the order stated and each later step works on the data as it stands after the earlier ones, so a statistic that a later step uses (a median for imputation, a mean for scaling) is computed on the rows that remain at that point unless the request says to take it from the original data; where the request is otherwise ambiguous, choose the reading a standard pandas or scikit-learn analyst would take and state it. checks: which shape, null count, or value range would confirm the computation ran on the intended rows and columns, always including the number of rows remaining after each filter. If review_note is not 'none' and not 'ok', a previous plan or its result was rejected for the reason stated there: revise the plan on exactly that point. Return exactly one JSON object {\"plan\": \"...\"}.",
+        "reads": [
+          "request",
+          "data_profile",
+          "review_note"
+        ],
+        "writes": [
+          "plan"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "review_count >= 3",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s4",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s4": {
+      "id": "s4",
+      "clause": "S1",
+      "action": {
+        "kind": "model",
+        "prompt": "Implement the plan. Write compute_cmd: ONE shell command that runs python3 (for example python3 - <<'EOF' ... EOF) with pandas on the data file, opened by the relative file name the request states because the command runs inside the working directory that holds it (never an absolute path; the absolute path is also exported as DATA_PATH, which from python needs import os first), performs exactly the computation described in plan with vectorized operations, prints the checks named in the plan first, then for every answer value one check line giving its unrounded value and the number of rows it was computed from, and prints the final answer lines last, each line built by filling the request's answer format literally (the name, then the value inside square brackets, rounded as the request specifies). Do not write any file; the answer file is written in a later step from these lines. Never substitute a default or placeholder (0, 0.00, an empty string) for a value that failed to compute: let the failure show in the output so the plan can be corrected. run_out and run_err hold the output of the previous run, if any: if it shows an error, fix exactly that cause. If review_note is not 'none' and not 'ok', the previous result was rejected for the reason stated there: change the computation on exactly that point. Return exactly one JSON object {\"compute_cmd\": \"<the command>\"}.",
+        "reads": [
+          "request",
+          "plan",
+          "run_out",
+          "run_err",
+          "review_note"
+        ],
+        "writes": [
+          "compute_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "code_count >= 4",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "code_count < 4 and review_count >= 3",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s5",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s5": {
+      "id": "s5",
+      "clause": "S1",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cd \"${work_dir}\" && export DATA_PATH=\"${data_path}\" WORK_DIR=\"${work_dir}\"; ${compute_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "run_out",
+          "run_err"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "run_out",
+          "stderr": "run_err"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s4",
+          "inc": "code_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s6": {
+      "id": "s6",
+      "clause": "S1",
+      "action": {
+        "kind": "model",
+        "prompt": "Validate the result before reporting it. run_out is the output of the computation (the checks followed by the answer lines; run_err is normally empty because the shell merges both streams). Compare them with request and plan: for every answer name the request requires there is a line that instantiates the request's answer format literally, character by character apart from the value: the same name, the value enclosed in square brackets, the stated rounding (an answer line with a missing bracket, a renamed key or a different decimal count is wrong_format and must be revised); values respect the stated rounding, ranges and units; the checks show the computation ran on the intended rows and columns: a check that prints False, a warning about assignment on a copy, or a row count after cleaning that is far below the number of rows with non-empty values in data_profile means the computation or its parsing is wrong and cannot pass; the method matches the constraints (library, parameters, encoding, random_state, handling of missing values), and a formula or estimator the request names is the one actually implemented, not a variant with a similar name. Decide review: 'pass' if all of this holds; 'revise_code' if the plan is right but the code deviates from it, an answer line is missing, or the output format is wrong; 'revise_plan' if a constraint was interpreted wrongly, an ambiguity was resolved implausibly, a filter kept zero rows or far fewer than the profile suggests, or an answer value is nan, inf, empty or a placeholder such as 0.00 that replaced a value which failed to compute (a correlation or statistic on an empty selection); such a result never passes. A rounded value of 0.00 or 0.01 is a real value, not a placeholder, when its check line shows a finite unrounded value computed from a non-zero number of rows. Judge only from what run_out, request and plan show: never reject a value because of your own estimate of what it should be, and name in review_note the exact output line that violates the request. Write review_note as one or two sentences naming the exact problem and the required change, or 'ok' when passing. Return exactly one JSON object {\"review\": \"pass|revise_code|revise_plan\", \"review_note\": \"...\"}.",
+        "reads": [
+          "request",
+          "plan",
+          "data_profile",
+          "run_out",
+          "run_err"
+        ],
+        "writes": [
+          "review",
+          "review_note"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "review == 'pass'",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "review == 'revise_code'",
+          "to": "s4",
+          "inc": "review_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "review == 'revise_plan'",
+          "to": "s3",
+          "inc": "review_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s7": {
+      "id": "s7",
+      "clause": "S5",
+      "action": {
+        "kind": "model",
+        "prompt": "run_out is the output of the computation, shown to you here as text. Write answer_lines: only the answer lines from run_out (the lines that instantiate the request's answer format, one per required answer name, in the order the request lists them), copied exactly as they appear there, one per line, leaving out the check lines and anything else. Copy every character unchanged (quotes, braces, brackets, commas, percent signs, decimals); do not reformat, round or reorder. If edit_log is not 'none', the previous write failed or produced wrong content: fix exactly that. Return exactly one JSON object {\"answer_lines\": \"<the lines, separated by newline characters>\"}.",
+        "reads": [
+          "request",
+          "run_out",
+          "edit_log"
+        ],
+        "writes": [
+          "answer_lines"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "write_count >= 3",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "write_count < 3 and repair_count >= 2",
+          "to": "s12",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s8": {
+      "id": "s8",
+      "clause": "S5",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "cat > \"${output_path}\" <<'__ANSWER__'\n${answer_lines}\n__ANSWER__"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "edit_log"
+        ],
+        "phase": "apply",
+        "labels": [],
+        "binds": {
+          "stdout": "edit_log"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s9",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7",
+          "inc": "write_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s9": {
+      "id": "s9",
+      "clause": "S4.1.7",
+      "action": {
+        "kind": "tool",
+        "name": "read",
+        "input": {
+          "filePath": "${output_path}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "file_content"
+        ],
+        "phase": "probe",
+        "labels": [
+          "verify"
+        ],
+        "binds": {
+          "stdout": "file_content"
+        }
+      },
+      "transitions": [
+        {
+          "if": "repair_count >= 2",
+          "to": "s12",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "repair_count < 2 and returncode == 0",
+          "to": "s10",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7",
+          "inc": "write_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s10": {
+      "id": "s10",
+      "clause": "S4.1.7",
+      "action": {
+        "kind": "judge",
+        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes every line with its line number and a colon, and appends an '(End of file - total N lines)' footer. None of that framing is file content; only the text after each line-number prefix is. Compare those content lines with the answer lines in run_out character by character: answer 'pass' if every answer line in run_out (the lines in the request's answer format) appears identically in file_content (every brace, bracket, quote and digit present) and file_content holds no other content line (a check line such as a shape or null count copied from run_out is extra text). Answer 'wrong_content' if an answer line is missing, a value or its format differs, there is an extra content line, or the file is empty. Answer '弃权' if file_content is unreadable.",
+        "reads": [
+          "file_content",
+          "run_out",
+          "request"
+        ],
+        "writes": [
+          "verify_verdict"
+        ],
+        "labels": [
+          "pass",
+          "wrong_content",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "verify_verdict == 'pass'",
+          "to": "s11",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == 'wrong_content' and repair_count < 2",
+          "to": "s7",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "to": "s9",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s12",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s11": {
+      "id": "s11",
+      "clause": "S5",
+      "action": {
+        "kind": "model",
+        "prompt": "Report the result: state that the answer file at output_path was written and read back, quote its content, and summarize in two sentences how the values were computed according to plan. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "file_content",
+          "plan"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_VERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s12": {
+      "id": "s12",
+      "clause": "S5",
+      "action": {
+        "kind": "model",
+        "prompt": "The answer file could not be verified after the allowed repairs. Report honestly what was written according to edit_log and file_content, state the intended answer lines from run_out, and say explicitly that the result is UNVERIFIED. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "edit_log",
+          "file_content",
+          "run_out"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_UNVERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_VERIFIED": {
+      "id": "END_VERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_VERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_UNVERIFIED": {
+      "id": "END_UNVERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_UNVERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "FALLBACK": {
+      "id": "FALLBACK",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_FALLBACK"
+      },
+      "transitions": [],
+      "origin": "compiler",
+      "locator": ""
+    }
+  },
+  "variables": [
+    {
+      "name": "request",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.request"
+    },
+    {
+      "name": "output_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.output_path"
+    },
+    {
+      "name": "data_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.data_path"
+    },
+    {
+      "name": "work_dir",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.work_dir"
+    },
+    {
+      "name": "inspect_cmd",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "data_profile",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "inspect_err",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "plan",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "compute_cmd",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "run_out",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "run_err",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "review",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "review_note",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "edit_log",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "file_content",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "verify_verdict",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "result",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "ok",
+      "type": "boolean",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "returncode",
+      "type": "integer",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stdout",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stderr",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "inspect_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "code_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "review_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "write_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "repair_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "answer_lines",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    }
+  ],
+  "terminals": [
+    {
+      "id": "END_VERIFIED",
+      "kind": "verified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_UNVERIFIED",
+      "kind": "unverified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_FALLBACK",
+      "kind": "fallback",
+      "output": []
+    }
+  ],
+  "prohibitions": [],
+  "thresholds": {
+    "min_support": 2,
+    "holdout_ratio": 0.2,
+    "acc_thr": 0.9,
+    "retry_budget": 3,
+    "loop_margin": 1.5,
+    "fallback_rate_target": 0.15,
+    "judge_rewrite_max": 2,
+    "judge_err_max": 0.2
+  },
+  "audit_tools": [],
+  "phase_rules": "default"
+}

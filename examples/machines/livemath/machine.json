@@ -1,0 +1,555 @@
+{
+  "format": "efsm-v1",
+  "skill_id": "livemath",
+  "version": "0.1.0",
+  "initial": "s1",
+  "fallback": "FALLBACK",
+  "max_steps": 40,
+  "states": {
+    "s1": {
+      "id": "s1",
+      "clause": "S1",
+      "action": {
+        "kind": "model",
+        "prompt": "Read the request: it contains a theorem-grounded mathematics question and five options labeled A to E. Write analysis as plain text with these labeled parts. question_core: what is being asked, in one sentence, and whether it asks for the strongest statement. hypotheses: the exact hypotheses and thresholds of the stated context (quantifiers such as 'there exists', 'for every', 'if and only if'; strict vs non-strict inequalities; local vs global; constants and their dependence). options: for each label A to E one line - restate the claim, then classify it as one of: matches the stated result exactly; weaker (drops a characterization, equality case, endpoint, uniformity, or is only a partial consequence); overstrong (adds uniqueness, converse, classification, global validity, stronger regularity, constant independence, or removes an assumption); changes a hypothesis or threshold; unrelated; or META (an option of the form 'one of the remaining options is correct but a stronger result can be proven'). support: judge ONLY against the text of the request - a clause is supported when the context itself states it, never because 'standard theory', 'the known result' or your own knowledge would justify it; for each option say explicitly whether every clause of it is stated in the context (yes) or whether it adds something the context does not state - a sharp constant, an endpoint case, uniformity, a log factor, uniqueness, a converse, a larger family (no, name the unsupported clause). meta_present: whether a META option exists. strength_ranking: rank the options that are true under the stated context from weakest to strongest, naming which are nested. Return exactly one JSON object {\"analysis\": \"...\"}.",
+        "reads": [
+          "request"
+        ],
+        "writes": [
+          "analysis"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "s2",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s2": {
+      "id": "s2",
+      "clause": "S2",
+      "action": {
+        "kind": "model",
+        "prompt": "Decide the answer from analysis and request. Decision procedure. Step 1: never discard a META option here (it makes no clause of its own); discard every concrete option whose support is 'no' in analysis - an option that sounds sharper is not stronger, it is false unless the context states that extra clause. Step 2: among the remaining supported options, if a META option is present, ask whether the strongest supported concrete option states the full result of the context; if the context's result is stronger than every supported concrete option (the concrete ones are weaker consequences, special cases or partial bounds), the answer is the META option; choose a concrete option over META only when it states the result exactly. In this benchmark the context is written from the theorem itself, so the correct concrete option restates that theorem clause by clause; options that add precision the context never states (explicit dependence of a constant, an endpoint or the full range of a parameter, uniqueness, uniformity, a rate) are traps even when they look more complete or more standard - prefer the option whose every clause appears in the context over a fuller-looking one. When a META option is present, a concrete option counts as restating the result only if it carries every conclusion clause the context states (the bound, the equality or rigidity case, the characterization, the exceptional cases); an option that states some of these parts, or the 'natural' version of the result, is the weaker true option, and then the META option is the answer. When in doubt between META and a concrete option, choose META. Step 3: without a META option, choose the strongest supported option. Rules from the skill: the correct choice is the strongest statement justified by the stated result; never pick an option merely because it sounds stronger - reject any option that adds unsupported assumptions or conclusions; if a concrete option is true but the stated result gives a strictly stronger conclusion that is not listed exactly, choose the META option; before choosing a concrete option over a META option, check whether the concrete option is only an existence statement, a corollary, a partial bound, a special case, or is missing a characterization, uniform estimate, uniqueness, endpoint, rigidity clause or equality case; for equivalence questions reject merely necessary or merely sufficient conditions; verify thresholds sign and endpoint literally; when the context does not contain the theorem text, prefer the option matching the safest standard formulation over a stronger-looking variant. If verify_note is 'extra', the option you chose last time was judged to add a clause the context never states: re-check by quoting - if every clause of that option does appear verbatim in the context (for example the bound 'at most 6g' is stated there), keep the same answer; only if a clause truly has no verbatim source choose the option that makes the same claim without that added clause. If verify_note is 'incomplete', the option you chose last time does not state every conclusion clause of the context: choose the META option if one exists; if there is no META option, choose the option that states the most conclusion clauses of the context. Before finalizing, ground the chosen option: split it into its clauses (each quantifier, each 'for all', 'independent of', 'no ... can', 'unique', 'sharp', each range or endpoint, each conclusion part) and for every clause quote the verbatim phrase of the context that states it. A quote must come from a sentence of the context that STATES a conclusion or hypothesis; the option's own wording, the question sentence ('what is the strongest ...', 'is f*g log-supermodular?') and 'the known result' are not quotes. When the context only poses the question and states no conclusion, no concrete option is grounded: choose the META option if present; otherwise use the shape of the option set: the options usually form a strength chain in which the weakest true-looking statement is a mere consequence (a distractor), the most extreme one adds an unsupported clause (a trap), and the actual theorem sits between them - so pick the middle of the chain. The chain contains only options that keep the question's hypotheses and differ in the strength of the conclusion; an option that changes or adds a hypothesis ('precisely when W is finite', 'only for a single subgraph', a restricted subfamily) is a hypothesis-changing distractor, not a chain member. The correct theorem answers exactly what the question asks: when the question asks whether an identity always holds, the unconditional identity is the theorem and the conditioned version is the distractor; when it asks for a named full property (k-homogeneous, Kummer-faithful), the option stating the full property is the theorem and a weakened single-instance version is the distractor. (the sharpest statement that adds no clause the mathematics cannot plausibly deliver: an explicit error term over a vague o(.), an 'exactly when' characterization over a one-way implication when the question asks for a characterization), not the weakest one. A clause with no verbatim phrase is unsupported: then drop that option and take the option without that clause, or the META option when one exists. Write answer_letter as the single option letter (A, B, C, D or E) and justification as the clause-by-clause list of quotes for the chosen option followed by one sentence on the decisive distinction. Return exactly one JSON object {\"answer_letter\": \"X\", \"justification\": \"...\"}.",
+        "reads": [
+          "request",
+          "analysis",
+          "verify_note"
+        ],
+        "writes": [
+          "answer_letter",
+          "justification"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "meta_count >= 1",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s2m",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s3": {
+      "id": "s3",
+      "clause": "S3",
+      "action": {
+        "kind": "model",
+        "prompt": "Write write_cmd: ONE shell command that writes exactly one line '\\\\boxed{X}' with X replaced by answer_letter to the file at output_path, creating or overwriting it, and prints nothing else. Preserve the backslash literally: use printf '%s\\\\n' with the boxed text in single quotes and the path in double quotes (printf '%s\\\\n' '\\\\boxed{C}' > \"/path/answer.txt\"); never use double-quoted echo, because \\\\b may become a backspace. If edit_log is not 'none', the previous command failed or wrote the wrong content: fix exactly that. Return exactly one JSON object {\"write_cmd\": \"<the command>\"}.",
+        "reads": [
+          "answer_letter",
+          "output_path",
+          "edit_log"
+        ],
+        "writes": [
+          "write_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "s3_count >= 4",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "s3_count < 4 and repair_count >= 2",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s4",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s4": {
+      "id": "s4",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "${write_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "edit_log"
+        ],
+        "phase": "apply",
+        "labels": [],
+        "binds": {
+          "stdout": "edit_log"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0",
+          "to": "s5",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s3",
+          "inc": "s3_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s5": {
+      "id": "s5",
+      "clause": "S3",
+      "action": {
+        "kind": "tool",
+        "name": "read",
+        "input": {
+          "filePath": "${output_path}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "file_content"
+        ],
+        "phase": "probe",
+        "labels": [
+          "verify"
+        ],
+        "binds": {
+          "stdout": "file_content"
+        }
+      },
+      "transitions": [
+        {
+          "if": "repair_count >= 2",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "repair_count < 2 and returncode == 0",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s3",
+          "inc": "s3_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s6": {
+      "id": "s6",
+      "clause": "S3",
+      "action": {
+        "kind": "judge",
+        "prompt": "file_content is the answer file read back after writing. Answer 'pass' if it contains exactly one \\\\boxed{X} whose letter X equals answer_letter and nothing else of substance (a line-number prefix from the read tool is fine). Answer 'wrong_content' if the letter differs, the backslash is missing, there is extra text, or the file is empty. Answer '弃权' if file_content is unreadable.",
+        "reads": [
+          "file_content",
+          "answer_letter"
+        ],
+        "writes": [
+          "verify_verdict"
+        ],
+        "labels": [
+          "pass",
+          "wrong_content",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "verify_verdict == 'pass'",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == 'wrong_content' and repair_count < 2",
+          "to": "s3",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "to": "s5",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s7": {
+      "id": "s7",
+      "clause": "S3",
+      "action": {
+        "kind": "model",
+        "prompt": "Report the result: state that the answer file at output_path was written and read back, quote its content, give answer_letter and the justification. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "file_content",
+          "answer_letter",
+          "justification"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_VERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s8": {
+      "id": "s8",
+      "clause": "S3",
+      "action": {
+        "kind": "model",
+        "prompt": "The answer file could not be verified after the allowed repairs. Report honestly what was written according to edit_log and file_content, state the intended answer_letter, and say explicitly that the result is UNVERIFIED. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "output_path",
+          "edit_log",
+          "file_content",
+          "answer_letter"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_UNVERIFIED",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_VERIFIED": {
+      "id": "END_VERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_VERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_UNVERIFIED": {
+      "id": "END_UNVERIFIED",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_UNVERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "FALLBACK": {
+      "id": "FALLBACK",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_FALLBACK"
+      },
+      "transitions": [],
+      "origin": "compiler",
+      "locator": ""
+    },
+    "s2m": {
+      "id": "s2m",
+      "clause": "S2",
+      "action": {
+        "kind": "judge",
+        "prompt": "answer_letter names the option chosen from request. If that option is the META option ('one of the remaining options is correct, but a stronger result can be proven'), answer 'complete'. Otherwise list, from the sentences of request that state a conclusion (not the question sentence), every conclusion clause: the bound or identity, its exact range and quantifiers, the equality or rigidity case, the characterization direction (one-way or 'exactly when'), exceptional cases. Answer 'complete' only if the chosen option states every one of those clauses; answer 'incomplete' if it drops any of them or if the context states no conclusion at all while a META option exists. Answer '弃权' if request is unreadable.",
+        "reads": [
+          "request",
+          "analysis",
+          "answer_letter"
+        ],
+        "writes": [
+          "verify_note"
+        ],
+        "labels": [
+          "complete",
+          "incomplete",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "verify_note == 'incomplete' and meta_count < 1",
+          "to": "s2",
+          "inc": "meta_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    }
+  },
+  "variables": [
+    {
+      "name": "request",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.request"
+    },
+    {
+      "name": "output_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.output_path"
+    },
+    {
+      "name": "analysis",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "answer_letter",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "justification",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "write_cmd",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "edit_log",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "file_content",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "verify_note",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "verify_verdict",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "result",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "ok",
+      "type": "boolean",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "returncode",
+      "type": "integer",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stdout",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stderr",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "s3_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "repair_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "meta_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    }
+  ],
+  "terminals": [
+    {
+      "id": "END_VERIFIED",
+      "kind": "verified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_UNVERIFIED",
+      "kind": "unverified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_FALLBACK",
+      "kind": "fallback",
+      "output": []
+    }
+  ],
+  "prohibitions": [],
+  "thresholds": {
+    "min_support": 2,
+    "holdout_ratio": 0.2,
+    "acc_thr": 0.9,
+    "retry_budget": 3,
+    "loop_margin": 1.5,
+    "fallback_rate_target": 0.15,
+    "judge_rewrite_max": 2,
+    "judge_err_max": 0.2
+  },
+  "audit_tools": [],
+  "phase_rules": "default"
+}

@@ -1,0 +1,882 @@
+{
+  "format": "efsm-v1",
+  "skill_id": "structure-preserving-spreadsheet-edits",
+  "version": "0.1.0",
+  "initial": "s1",
+  "fallback": "FALLBACK",
+  "max_steps": 67,
+  "states": {
+    "s1": {
+      "id": "s1",
+      "clause": "S2.1.1",
+      "action": {
+        "kind": "model",
+        "prompt": "Inspect Before Editing. Produce inspect_cmd: ONE shell command 'python3 - <<'PY' ... PY' (openpyxl available) that reads the workbook at os.environ['INPUT_PATH'] (never a literal path), writes nothing, and prints this report: (1) for every sheet: name, dimensions, max_row, max_column, merged ranges; (2) CELLS: if the sheet has at most 400 non-empty cells, print EVERY non-empty cell row by row as 'A1=<formula or value> [cached=<value>]' (load the workbook twice, data_only=False and data_only=True; a value that is an openpyxl ArrayFormula object is a formula - print its .text, detect it with hasattr(v, 'text'), do not import ArrayFormula); larger sheets: the first 15 rows, the last 5 rows, and every row that has an empty cell inside the populated rectangle; (3) CANDIDATE RESULT PLACES: first the RECORD ROW RANGE of each table = header row + 1 .. the last row in which ANY column of that table has data (one range shared by all columns of the table - never a per-column range); then for each column that has a header, whether its cells over that shared record row range are ALL FILLED, PARTIALLY FILLED or ALL EMPTY (a column with values only in the first 2 of 14 record rows is PARTIALLY FILLED) - for PARTIALLY FILLED print the filled cells and the empty cells each as 'first..last (n cells)' over the WHOLE record row range, never a truncated list; then 2-D BLOCKS: a row of labels with a column of labels to its left (a matrix like C3:F3 x B4:B6) - print the inner rectangle (C4:F6), which inner cells are filled and which are empty; the first empty column after the last populated one; the first empty row under the last record; short text labels whose right/lower neighbour is empty ('LABEL A5 -> EMPTY B5'); cells whose cached value is an error. If followup_targets is not 'none', add a section that prints those targets in full. If inspect_report or stderr shows a Python error from the previous inspect_cmd, that command was broken: return the same command with exactly that error fixed, do not start over. Code rules: the only helper import allowed is 'from openpyxl.utils import get_column_letter' (coordinate_from_string and friends live elsewhere and break the import - address cells by row/column numbers instead); wrap each section in try/except and keep printing; ws.cell(row=, column=); only load_workbook, wb.sheetnames, wb[name], ws.iter_rows, ws.cell, ws.max_row, ws.max_column, ws.merged_cells.ranges, ws.dimensions; at most ~200 lines of output; exit 0 unless the workbook cannot be opened. Write the script directly without long deliberation. Return exactly one JSON object {\"inspect_cmd\": \"<the command>\"}.",
+        "reads": [
+          "followup_targets",
+          "input_path",
+          "inspect_cmd",
+          "inspect_report",
+          "output_path",
+          "request",
+          "stderr"
+        ],
+        "writes": [
+          "inspect_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "inspect_count >= 3",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s2",
+          "inc": null,
+          "support": 98,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s2": {
+      "id": "s2",
+      "clause": "S2.1.1",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "INPUT_PATH=\"${input_path}\" ${inspect_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "inspect_report"
+        ],
+        "phase": "probe",
+        "labels": [],
+        "binds": {
+          "stdout": "inspect_report"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0 and stdout != '(no output)'",
+          "to": "s3",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s1",
+          "inc": "inspect_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s3": {
+      "id": "s3",
+      "clause": "S2.1.2",
+      "action": {
+        "kind": "model",
+        "prompt": "The request is a TASK to perform on the workbook, never a question to answer in prose: 'How can I ...' or 'I need a formula ...' means do it - put the result into the workbook cells where the layout expects it and save. From inspect_report and request, infer the real table structure and, most importantly, the OUTPUT SPAN: the exact cells that must receive the requested result. Find it from the layout, not from the wording alone: empty cells under a header whose label matches what the request asks for; a template or example block where the first row is already filled by hand (then the span is the whole block, including the rows still empty); the cell the request names, extended down/across to cover every record or header of the same kind (if the request says 'cell G4' but the block has rows 4-6, the span is G4:G6). Use both formula view and cached values to tell real record rows from summary or blank placeholder rows; if a sheet references another sheet for names or row structure, that source structure is part of the boundary. The CELLS section of inspect_report (every non-empty cell) is the ground truth; the CANDIDATE section is only a summary computed by a script - when they disagree (a column the summary calls ALL FILLED but whose cells stop after a few rows in CELLS, or an empty candidate list while CELLS shows a header with empty cells under it), trust CELLS and derive the candidates yourself before choosing. inspect_report ends with 'CANDIDATE RESULT PLACES' (partially filled columns with examples, empty columns under a header, label -> empty cell, next empty row): pick the output span from these candidates - the one whose header/label matches what the request asks for - unless the request names the place itself; a partially filled column or row whose header matches is the span (the whole block, examples included). When a named cell is extended down or across, extend it over the rows of ITS OWN block - the labels right next to it (a list of models in F4:F6 next to G4 -> G4:G6), not over the rows of the source table the formula reads from. If verify_report is not 'none', a previous attempt was rejected: read its CHECKLIST and edit_plan, and choose a different span or deliverable when the flags say the place was wrong (cells overwritten, written outside the span, header row touched) - do not return the same boundary_model. Decide the output span in this priority order: (1) a place the request names explicitly (a cell like 'B323' or 'G4', a column, a sheet) - then the span is that cell, or that cell's block extended over rows of the same kind, never a whole unrelated column; when the named cell holds a formula and neighbouring cells hold the same formula pattern (a formula dragged down or across), all of them are one block and must all be fixed (C15 named, C16 has the same broken formula -> C15:C16); (2) a partially filled block in the report where the first cells already hold example results and the rest are empty - the span is the EMPTY cells of that block together with the example cells that must stay as they are (D3,E3 filled and F3,G3 empty under matching headers -> D3:G3; B2:B4 filled and B5:B7 empty in the same column -> B2:B7, work goes into B5:B7; A13 holds one example below a table -> A13 downwards) - never take only the already-filled example cells as the span; (3) empty cells under a header whose label matches the requested result. Only if none of these exists, add a new block next to the data. Row 1 is a header only when its cells are text labels of a different kind from the rows below; when row 1 holds a record like the rows beneath (a number, an id, a date, a description of the same kind - e.g. A1=911313316543722 and A2=913313331154233), there is NO header row and the output span starts at row 1 (B1:B269, not B2:B269) - a result column always covers every record row, including row 1. The output span is almost never A1 or another top-left corner cell of a populated sheet - when the request does not name the place, look for the empty cell next to the label that names the requested quantity. The output span is never the header row (the row holding column labels) and never a column or block whose cells already hold values or formulas for every record (an ArrayFormula is an existing formula) - such cells are inputs, unless the request is precisely to fix or replace them. When the request names the target ('in column C', 'C1:C10 should be ...', 'in column 2'), that named place is the span even if another column looks like a more natural home. The output span is where RESULTS go: empty result cells (plus the example cells that must stay), never the source data table itself - existing non-empty data is input to read, not a place to write, unless the request explicitly asks to modify those cells (fix a formula, reformat a column). When the request says a formula is wrong, broken or must be fixed, the deliverable is the CORRECTED FORMULA written back into the cells that hold the faulty formula (and every neighbouring cell that repeats the same faulty pattern - the whole block is the span), never a pasted value; the user wants a working formula, not the number it should show. There is ALWAYS an output span - the task is graded on workbook cells; never answer 'None', 'N/A' or 'not applicable'. When the request is a lookup/matrix task and the CANDIDATE list shows a 2-D BLOCK (row labels x column labels) with only some inner cells filled, the output span is the WHOLE inner rectangle (C4:F6), never one column of it. A column the CANDIDATE list marks ALL FILLED is never part of the output span (its cells are inputs); a PARTIALLY FILLED column whose filled cells look like the requested result (same kind of value) is the span, filled examples included. Write boundary_model as plain text with these labeled parts: candidate_used (copy the exact CANDIDATE line you chose, or 'request-named: <cell/column>' when the request names the place, or 'none' with a one-line reason); target_sheet (copied EXACTLY from the sheet names listed in inspect_report - never assume 'Sheet1'); table_range; header_row; record_rows; output_span (exact Sheet!A1:B9 range - never a single cell when the block has more rows); deliverable ('values' unless the request text literally asks for a formula/function to be placed in the cells - 'how can I ...' questions want the resulting values; when in doubt choose values); source_data (the ranges the result is computed from); expected_existing (what the output span holds now). Write followup_targets: what still needs inspecting to be sure, or 'none'. Return exactly one JSON object {\"boundary_model\": \"...\", \"followup_targets\": \"...\"}.",
+        "reads": [
+          "edit_plan",
+          "followup_targets",
+          "inspect_report",
+          "request",
+          "verify_report"
+        ],
+        "writes": [
+          "boundary_model",
+          "followup_targets"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "boundary_count >= 2",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s4",
+          "inc": null,
+          "support": 98,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s4": {
+      "id": "s4",
+      "clause": "S2.1.3",
+      "action": {
+        "kind": "judge",
+        "prompt": "Decide whether inspect_report gives enough structural evidence to commit to boundary_model. Answer 'sufficient' by default: the report already shows the sheets, the header row, the populated region and the formulas. Answer 'insufficient' ONLY if the request refers to a sheet, table or range that the report does not show at all, or followup_targets names something concrete that was never inspected. Answer '弃权' only if the report is empty or unreadable. Answer 'insufficient' also when the CELLS section is empty or missing although the sheet has data (the script printed nothing there), or when the inspection output itself is broken: it contains 'Traceback' or 'ERROR', a section printed nothing, or the header row and the cells around the empty target/result area were not printed - a judgement made on a half-failed inspection is not a judgement.",
+        "reads": [
+          "inspect_report",
+          "boundary_model",
+          "followup_targets"
+        ],
+        "writes": [
+          "boundary_verdict"
+        ],
+        "labels": [
+          "sufficient",
+          "insufficient",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "(boundary_verdict == 'insufficient' or boundary_verdict == '弃权') and inspect_count < 2",
+          "to": "s1",
+          "inc": "inspect_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "boundary_verdict == 'insufficient' and inspect_count >= 2",
+          "to": "s5",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "boundary_verdict == 'sufficient'",
+          "to": "s5",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s5": {
+      "id": "s5",
+      "clause": "S2.2.1",
+      "action": {
+        "kind": "model",
+        "prompt": "The request is a TASK to perform on the workbook, never a question to answer in prose: 'How can I ...' or 'I need a formula ...' means do it - put the result into the workbook cells where the layout expects it and save. Edit Narrowly. Take output_span, deliverable and source_data from boundary_model. Write edit_plan: EVERY cell of the output span with address, expected existing value and new value - fill the whole span, never only the first cell; change nothing outside it (no inserted rows/columns, no header edits, no formatting changes unless requested). Deliverable rules: default to literal computed values - compute them in Python from source_data (read the workbook with data_only=True for cached inputs) and write numbers/text/dates into the cells. Write a formula only if the request explicitly demands a formula AND it is a plain formula that LibreOffice/Excel 2013 evaluates without array entry (SUMIF, COUNTIF, SUMPRODUCT, VLOOKUP, INDEX/MATCH on a single lookup, IF, TEXT, LEFT/MID/RIGHT, DATE); never write formulas that need array/CSE evaluation (SMALL(IF(...)), INDEX(...IF(...)), MATCH(1,(...)*(...),0)) and never FILTER, UNIQUE, SORT, TEXTJOIN, LET, LAMBDA - compute those results in Python and write the values. A sheet name that contains spaces or punctuation is referenced with SINGLE quotes: 'WHP DATA'!$B$2:$E$40 - \"WHP DATA\"!B2 with double quotes is a text literal and every such formula returns #VALUE!. A formula string must start with '=' and string literals inside it must use double quotes (\"Collection-\"), never single quotes (a single-quoted literal makes LibreOffice/Excel return #NAME?). A record row whose source cells are all empty gets NO result: the cell stays truly empty (ws[cell].value = None, or simply not written) - never the text '\"\"', never '' and never a formula, because a formula cannot produce an empty cell and a graded blank must be None and edit_plan says 'blanks intended: <rows>' - a computed 0 or a copied blank-turned-value in such rows is wrong. The filled example cells of the block are TEST CASES: compute the result for the whole block, check that your computed values for the example cells equal the examples exactly (same items, same order, same spelling), and only then write the remaining cells with the continuation of that same computation (example rows 1..k hold results 1..k, so row k+1 gets result k+1 - never restart or shift the list); if your computation does not reproduce the examples, the computation is wrong - fix it before writing anything. This applies to formulas too: evaluate the formula's logic in Python for the example rows first. A formula written into several rows must be adjusted per row - relative references move with the row (C2/D2 in row 2 become C3/D3 in row 3); a plan where every row carries the identical formula text with the same row numbers is wrong unless those references are meant to be absolute ($C$2). Cells of the span that already hold the right example values are left exactly as they are, and every new value must copy the exact spelling, letter case and number/date format of those existing examples in the same column; text extracted or copied from other cells is stripped of leading/trailing spaces unless the examples keep them (existing 'CHEP' -> write 'LOSCAM', not 'Loscam', even if the request spells it differently). If this is a retry after a 'wrong_cells' verdict, first read the CHECKLIST (section 4) of verify_report and fix exactly the flagged problem: 'overwrote existing cells' -> keep your computed results but move them into the empty result cells and leave the overwritten cells as they are in the ORIGINAL workbook (regenerating from INPUT_PATH restores them automatically); 'constant everywhere' -> the computation logic is wrong, rethink it against the examples; 'computed ERROR values' in every target cell (#VALUE!, #NAME?, #REF!) almost always means malformed SYNTAX, not wrong logic - check the sheet-name quoting ('WHP DATA'!), the string literal quoting, and whether the function exists in LibreOffice/Excel 2013 - and fix the syntax before touching the logic; never blank, clear or delete cells to make the audit quiet, and never resubmit the same values unless the only flagged item is empty target cells for rows where the request itself says the answer is blank (no match -> empty) - in that case resubmit and write 'blanks intended: <rows>' in edit_plan. If verify_report or edit_log is not 'none', this is a retry: read what went wrong: a Python error in edit_log/stderr; in verify_report the lines 'EMPTY CELLS IN OUTPUT SPAN', 'OUTSIDE SPAN' and the computed values marked ERROR/EMPTY, regenerate from the ORIGINAL workbook at input_path and fix exactly that. edit_plan must contain at least one cell - an empty plan is never acceptable. If the request asks to fix a formula, new_value is the corrected formula string (starting with '=') for every cell of the faulty block, not a computed number. Cell types matter for grading: NEVER write a time or date as text (no '06:08:00 下午', no '2024-01-01' strings) - when the example cells or the source cells are datetime.time/datetime values, write datetime.time/datetime objects (or numeric serials) with the same number_format; a time-of-day is a datetime.time or a day fraction (11:15 -> 0.46875) with a time number_format, never a datetime.datetime (openpyxl stores that as a date+time serial like 45292.47); a date is a datetime.date/datetime; a number is int/float, not a numeric string; keep the number_format of the example cells. Never overwrite existing non-empty data cells (the source table, headers, examples) unless the request explicitly asks to change them; results go into the empty result cells. Then write edit_cmd: ONE shell command running python3 via heredoc (python3 - <<'PY' ... PY): read the paths from os.environ['INPUT_PATH'] and os.environ['OUTPUT_PATH'] (never type a path literally); load INPUT_PATH with load_workbook(path) in formula mode - NEVER save a workbook that was loaded with data_only=True (that converts every formula to a value); if you need cached values, load a second copy with data_only=True for reading only; never modify the input file; applies exactly edit_plan, sets wb.calculation.fullCalcOnLoad = True if any formula was written, saves to OUTPUT_PATH, then reopens OUTPUT_PATH and prints every planned cell as 'SHEET!ADDR: old -> new', and finally asserts the file exists; exit non-zero on any exception or if the file is missing. Sheet access: take sheet names EXACTLY from inspect_report / boundary_model - never assume 'Sheet1'; if the previous edit_log says 'Worksheet X does not exist', X was invented and must be replaced by the name listed in inspect_report; if the workbook has a single sheet use ws = wb[wb.sheetnames[0]] instead of a literal name; if a named sheet is missing, fall back to wb.sheetnames[0] rather than failing. Build the script from a Python list of (address, value) pairs written as plain literals - no f-strings that nest quotes (a formula string contains double quotes; put it in a single-quoted or triple-quoted literal), no string concatenation of formulas at runtime. Use only basic openpyxl APIs (load_workbook, wb[sheet], ws[addr].value, ws.cell(row=, column=).value, wb.save). An edit_plan address like 'Sheet1!F2' must be split into sheet and cell before indexing (sheet, cell = addr.rsplit('!', 1); ws = wb[sheet]; ws[cell].value = ...) - passing 'Sheet1!F2' to ws[...] raises 'is not a valid coordinate'; ws.cell takes row= and column= (never col=). A cell inside a merged range is a read-only MergedCell: write to the top-left cell of that range instead (look it up in ws.merged_cells.ranges) - never fail on it. Return exactly one JSON object {\"edit_plan\": \"...\", \"edit_cmd\": \"<the command>\"}.",
+        "reads": [
+          "request",
+          "input_path",
+          "output_path",
+          "boundary_model",
+          "inspect_report",
+          "verify_report",
+          "edit_log",
+          "stderr"
+        ],
+        "writes": [
+          "edit_plan",
+          "edit_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "s5_count >= 8",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "compiler"
+        },
+        {
+          "if": "s5_count < 8 and repair_count >= 5",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s6",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s6": {
+      "id": "s6",
+      "clause": "S2.2.2",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "INPUT_PATH=\"${input_path}\" OUTPUT_PATH=\"${output_path}\" ${edit_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "edit_log"
+        ],
+        "phase": "apply",
+        "labels": [],
+        "binds": {
+          "stdout": "edit_log"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0 and stdout != '(no output)'",
+          "to": "s6_loop",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s5",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s7g": {
+      "id": "s7g",
+      "clause": "S2.3.1",
+      "action": {
+        "kind": "model",
+        "prompt": "Verify The Saved Workbook. First: if verify_cmd is not 'none', verify_report contains '=== 4.' and contains NO 'error', 'Error', 'Traceback' or 'does not exist' text, and the target ranges are unchanged, return the same verify_cmd unchanged - a report with an error line in any section means the script is broken and must be fixed, not reused. If verify_report or stderr shows a Python error from the previous audit script, return that script with exactly that error fixed. Sheet names come ONLY from the target ranges and boundary_model.target_sheet (e.g. 'DATI') - never assume 'Sheet1'; if the previous report says 'Worksheet X does not exist', X was invented and must be replaced by the sheet named in the targets. Otherwise produce verify_cmd: ONE shell command 'python3 - <<'PY' ... PY' that reads os.environ['INPUT_PATH'] and os.environ['OUTPUT_PATH'] (never literal paths), never writes OUTPUT_PATH, and holds the TARGET RANGES (output span from boundary_model plus any other cell in edit_plan) as a Python list of 'Sheet!A1:B9' strings - nothing else copied from edit_plan. It prints: '=== 1. CHANGED CELLS ===' every cell whose formula-view value differs between input and output (both loaded with data_only=False; compare row by row over the larger of the two dimensions; ArrayFormula -> .text) as 'Sheet!A1: old -> new [IN SPAN|OUTSIDE SPAN]' plus ' OVERWRITES EXISTING DATA' when old was non-empty, at most 80 lines; '=== 2. TARGET CELLS ===' stored value of every target cell and 'EMPTY TARGETS: <list or none>'; '=== 3. COMPUTED VALUES ===' if shutil.which('soffice'): copy the output to a temp dir, run ['soffice','--headless','--convert-to','xlsx','--outdir',tmpdir,copy] with env HOME=tmpdir, timeout 120, capture_output=True, read the converted copy with data_only=True and print each target cell's value (None/'' -> EMPTY, strings starting with '#' -> ERROR); else print 'computed values unavailable'; '=== 4. SUMMARY ===' counts of changed / outside-span / empty targets / overwritten (list them), formula count per sheet input vs output, then the CHECKLIST: one 'FLAG ...' line per finding - overwrote existing non-empty cells; more than 3 cells changed outside the span; target cells still empty; formula count fell; computed ERROR values; all computed values EMPTY; 3+ non-empty computed values all identical; output file missing; no cell changed - or the single line 'OK: no flags'. Always exit 0 once the report is printed. Code rules: 'import os, sys, shutil, subprocess, tempfile, openpyxl' and 'from openpyxl.utils import range_boundaries, get_column_letter' (range_boundaries returns 4 values: min_col, min_row, max_col, max_row); split targets with rsplit('!', 1) and strip quotes from the sheet name; the sheet list is wb.sheetnames; ws.cell(row=, column=); cells have no .data_only; compute lists first, then print; wrap each section in try/except. Write the script directly without long deliberation. Return exactly one JSON object {\"verify_cmd\": \"<the command>\"}.",
+        "reads": [
+          "boundary_model",
+          "edit_plan",
+          "edit_log",
+          "verify_cmd",
+          "verify_report",
+          "stderr"
+        ],
+        "writes": [
+          "verify_cmd"
+        ],
+        "introduced": false,
+        "observable": false,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "s7g_count >= 5",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s7": {
+      "id": "s7",
+      "clause": "S2.3.1",
+      "action": {
+        "kind": "tool",
+        "name": "bash",
+        "input": {
+          "command": "INPUT_PATH=\"${input_path}\" OUTPUT_PATH=\"${output_path}\" ${verify_cmd}"
+        },
+        "reads": [],
+        "writes": [
+          "ok",
+          "returncode",
+          "stdout",
+          "stderr",
+          "verify_report"
+        ],
+        "phase": "probe",
+        "labels": [
+          "verify"
+        ],
+        "binds": {
+          "stdout": "verify_report"
+        }
+      },
+      "transitions": [
+        {
+          "if": "returncode == 0 and stdout != '(no output)'",
+          "to": "s7_loop",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7g",
+          "inc": "s7g_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s8": {
+      "id": "s8",
+      "clause": "S2.3.3",
+      "action": {
+        "kind": "judge",
+        "prompt": "Judge verify_report. Step 1 - find every line that starts with 'FLAG' in the report. If there is at least one FLAG line, the answer is 'wrong_cells', except in exactly two cases: (a) the only FLAG is 'overwrote existing non-empty cells' AND the request explicitly asks to change those very cells (fix this formula, fill this column, reformat these cells) - then continue to step 2; (b) the only FLAG is 'target cells still empty' AND edit_plan contains 'blanks intended' - then continue to step 2. Step 2 - only if no FLAG line stops you: look at the computed values (section 3): if they are what the request asks for and consistent with the examples already in the block (same kind of value, same spelling and case), answer 'pass'; a text string where the examples are numbers, dates or times (e.g. '06:08:00 下午' next to datetime.time examples) is 'wrong_cells'; if they contradict the request or the examples, answer 'wrong_cells'. Answer 'boundary_wrong' instead of 'wrong_cells' when the FLAGs show the cells were written to the wrong place (header row, a column that already held data or formulas for every record, or somewhere other than where the request or the layout puts the result). Answer '弃权' only if the report has none of the sections 1-4. Never answer 'pass' while a FLAG line is present, unless case (a) or (b) applies.",
+        "reads": [
+          "verify_report",
+          "edit_plan",
+          "boundary_model"
+        ],
+        "writes": [
+          "audit_verdict"
+        ],
+        "labels": [
+          "pass",
+          "wrong_cells",
+          "boundary_wrong",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "audit_verdict == 'pass'",
+          "to": "s9",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "audit_verdict == 'wrong_cells' and repair_count < 2",
+          "to": "s5",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "((audit_verdict == 'wrong_cells' and repair_count >= 2) or audit_verdict == 'boundary_wrong') and boundary_count < 1",
+          "to": "s3",
+          "inc": "boundary_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "((audit_verdict == 'wrong_cells' and repair_count >= 2) or audit_verdict == 'boundary_wrong') and boundary_count >= 1 and inspect_count < 2",
+          "to": "s1",
+          "inc": "inspect_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "audit_verdict == '弃权' and s7g_count < 3",
+          "to": "s7g",
+          "inc": "s7g_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s10",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s9": {
+      "id": "s9",
+      "clause": "S2.3.3",
+      "action": {
+        "kind": "model",
+        "prompt": "Report the result of the verified edit: state that the saved workbook at output_path was reopened and audited against the input, list the exact changed cells from edit_log and verify_report with old and new values, and confirm there are no unexpected changes outside the intended target set and no missing edits. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "request",
+          "output_path",
+          "edit_plan",
+          "edit_log",
+          "verify_report"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_VERIFIED",
+          "inc": null,
+          "support": 74,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "s10": {
+      "id": "s10",
+      "clause": "S2.2.5",
+      "action": {
+        "kind": "model",
+        "prompt": "The machine retreated through plan repair, boundary re-derivation and re-inspection and still could not pass the audit. Report honestly what was attempted for request, what the last verify_report showed, which cells (if any) were written to output_path according to boundary_model, and state explicitly that the result is UNVERIFIED and must not be trusted without a manual check. Return exactly one JSON object {\"result\": \"...\"}.",
+        "reads": [
+          "request",
+          "output_path",
+          "boundary_model",
+          "verify_report"
+        ],
+        "writes": [
+          "result"
+        ],
+        "introduced": false,
+        "observable": true,
+        "labels": []
+      },
+      "transitions": [
+        {
+          "if": "",
+          "to": "END_UNVERIFIED",
+          "inc": null,
+          "support": 24,
+          "origin": "document"
+        }
+      ],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_VERIFIED": {
+      "id": "END_VERIFIED",
+      "clause": "S2.3",
+      "action": {
+        "kind": "end",
+        "terminal": "END_VERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "END_UNVERIFIED": {
+      "id": "END_UNVERIFIED",
+      "clause": "S2.2.5",
+      "action": {
+        "kind": "end",
+        "terminal": "END_UNVERIFIED"
+      },
+      "transitions": [],
+      "origin": "document",
+      "locator": ""
+    },
+    "FALLBACK": {
+      "id": "FALLBACK",
+      "clause": "",
+      "action": {
+        "kind": "end",
+        "terminal": "END_FALLBACK"
+      },
+      "transitions": [],
+      "origin": "compiler",
+      "locator": ""
+    },
+    "s7_loop": {
+      "id": "s7_loop",
+      "clause": "",
+      "action": {
+        "kind": "judge",
+        "prompt": "The audit in s7 is a program written for this workbook: answer 'again' only if its report is empty, unreadable or missing the sections (the script itself failed); otherwise answer 'continue' so the report can be judged.",
+        "reads": [
+          "stdout",
+          "verify_report"
+        ],
+        "writes": [
+          "s7_loop_choice"
+        ],
+        "labels": [
+          "again",
+          "continue",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "s7_loop_choice == 'again'",
+          "to": "s7g",
+          "inc": "s7g_count",
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "s7_loop_choice == 'continue'",
+          "to": "s8",
+          "inc": null,
+          "support": 0,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s7g",
+          "inc": "s7g_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "trace",
+      "locator": ""
+    },
+    "s6_j": {
+      "id": "s6_j",
+      "clause": "",
+      "action": {
+        "kind": "judge",
+        "prompt": "After s6: bash/apply {\"command\": \"${edit_cmd}\"}, decide which step comes next. Options: 's7g' = s7g: model → ['verify_cmd'] ('Verify The Saved Workbook. Write ONE shell command (python3 with openpyxl) that '); 's10' = give up this attempt (the apply step is hopeless: the workbook cannot be saved at all) and fall back. Answer 's10' only when the outputs show that step is needed now; otherwise answer 's7g'.",
+        "reads": [
+          "stdout",
+          "edit_log"
+        ],
+        "writes": [
+          "s6_j_choice"
+        ],
+        "labels": [
+          "s7g",
+          "s10",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "s6_j_choice == 's10'",
+          "to": "FALLBACK",
+          "inc": null,
+          "support": 1,
+          "origin": "trace"
+        },
+        {
+          "if": "",
+          "to": "s7g",
+          "inc": null,
+          "support": 93,
+          "origin": "trace"
+        }
+      ],
+      "origin": "trace",
+      "locator": ""
+    },
+    "s6_loop": {
+      "id": "s6_loop",
+      "clause": "",
+      "action": {
+        "kind": "judge",
+        "prompt": "Step s6: bash/apply {\"command\": \"${edit_cmd}\"} may need to run more than once. Given its output, answer 'again' if the step must be repeated with new parameters, otherwise 'continue'.",
+        "reads": [
+          "stdout",
+          "edit_log"
+        ],
+        "writes": [
+          "s6_loop_choice"
+        ],
+        "labels": [
+          "again",
+          "continue",
+          "弃权"
+        ],
+        "abstain": "弃权",
+        "examples": [],
+        "error_rate": 0.0,
+        "support": 0,
+        "introduced": false,
+        "gold_from": ""
+      },
+      "transitions": [
+        {
+          "if": "s6_loop_choice == 'again'",
+          "to": "s5",
+          "inc": "s5_count",
+          "support": 25,
+          "origin": "trace"
+        },
+        {
+          "if": "s6_loop_choice == 'continue' and (returncode == 0)",
+          "to": "s6_j",
+          "inc": null,
+          "support": 101,
+          "origin": "document"
+        },
+        {
+          "if": "",
+          "to": "s5",
+          "inc": "repair_count",
+          "support": 0,
+          "origin": "document"
+        }
+      ],
+      "origin": "trace",
+      "locator": ""
+    }
+  },
+  "variables": [
+    {
+      "name": "request",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.request"
+    },
+    {
+      "name": "input_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.input_path"
+    },
+    {
+      "name": "output_path",
+      "type": "string",
+      "init": null,
+      "init_from": "task.input.output_path"
+    },
+    {
+      "name": "followup_targets",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "inspect_report",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "verify_report",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "inspect_cmd",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "boundary_model",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "boundary_verdict",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "edit_plan",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "edit_cmd",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "edit_log",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "audit_verdict",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "result",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "ok",
+      "type": "boolean",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "returncode",
+      "type": "integer",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stdout",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "stderr",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "inspect_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "repair_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "s7_loop_choice",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "s7g_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "s6_j_choice",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "s6_loop_choice",
+      "type": "string",
+      "init": null,
+      "init_from": null
+    },
+    {
+      "name": "s5_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    },
+    {
+      "name": "verify_cmd",
+      "type": "string",
+      "init": "none",
+      "init_from": null
+    },
+    {
+      "name": "boundary_count",
+      "type": "integer",
+      "init": 0,
+      "init_from": null
+    }
+  ],
+  "terminals": [
+    {
+      "id": "END_VERIFIED",
+      "kind": "verified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_UNVERIFIED",
+      "kind": "unverified",
+      "output": [
+        "result"
+      ]
+    },
+    {
+      "id": "END_FALLBACK",
+      "kind": "fallback",
+      "output": []
+    }
+  ],
+  "prohibitions": [],
+  "thresholds": {
+    "min_support": 2,
+    "holdout_ratio": 0.2,
+    "acc_thr": 0.9,
+    "retry_budget": 3,
+    "loop_margin": 1.5,
+    "fallback_rate_target": 0.15,
+    "judge_rewrite_max": 2,
+    "judge_err_max": 0.2
+  },
+  "audit_tools": [],
+  "phase_rules": "default"
+}

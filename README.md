@@ -1,6 +1,6 @@
 <div align="center">
 
-# hexis
+# HEXIS
 
 **Compile agent skills into extended finite state machines.**
 
@@ -8,7 +8,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green)](#license)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](CHANGELOG.md)
 
-[Why](#why-hexis) · [Installation](#installation) · [Quick start](#quick-start) · [Concepts](#concepts) ·
+[Why](#why-hexis) · [Installation](#installation) · [Quick start](#quick-start) · [Examples](#example-machines) · [Concepts](#concepts) ·
 [Updating](#updating-a-machine-with-a-model) · [Using a machine](#using-a-machine) · [CLI](#command-line-interface) ·
 [Development](#development) · [Citation](#citation)
 
@@ -45,6 +45,8 @@ This package accompanies the paper *Compiling Agent Skills into Extended Finite 
   interpreted execution of the skill, so a partially learned machine can still finish a task.
 - **Real tool backends.** OpenCode's native tools, a local `bash` backend, or tools that the model realizes from
   registry definitions.
+- **Example machines.** Four compiled machines (data analysis, mathematics, question answering over a corpus,
+  spreadsheet editing) ship in `examples/machines/`, each with its guide.
 - **Hermetic test suite.** More than 350 tests that need no network access, model endpoint or API key.
 
 ## How it works
@@ -123,6 +125,29 @@ hexis-agent update --build build/ --traces traces/ $M
 cat build/GUIDE.md                          # how the machine works; build/PROMPT.md is the agent prompt
 hexis-agent run --machine build/ --input request="..." --workdir work/ --executor local $M
 ```
+
+## Example machines
+
+`examples/machines/` holds four machines compiled from skills for four task families, each with the `GUIDE.md`
+that `hexis-agent guide` writes for it (inputs, tools, a Mermaid diagram, every state and transition):
+
+| Machine | Task | Inputs | States |
+|---|---|---|---|
+| [`dabench`](examples/machines/dabench/) | answer a data-analysis question about one data file with a computation | `request`, `data_path`, `work_dir`, `output_path` | 15 |
+| [`livemath`](examples/machines/livemath/) | answer a theorem-grounded multiple-choice mathematics question | `request`, `output_path` | 12 |
+| [`sealqa`](examples/machines/sealqa/) | answer a question from a local corpus of page files, with evidence | `request`, `docs_dir`, `work_dir`, `output_path` | 21 |
+| [`spreadsheet`](examples/machines/spreadsheet/) | edit a workbook without changing its structure | `request`, `input_path`, `output_path` | 17 |
+
+All four follow the same pattern: a `model` state writes a shell command, a `tool` state runs it, transitions
+branch on `returncode` with bounded retry counters, the answer file is read back and a `judge` state decides
+whether the run ends in `END_VERIFIED` or `END_UNVERIFIED`. They load and pass the structural checks without a
+model; running them needs a model endpoint:
+
+```bash
+hexis-agent run --machine examples/machines/livemath --input request="..." --input output_path=answer.txt     --workdir work/ --executor local $M
+```
+
+See [examples/machines/README.md](examples/machines/README.md) for the flow of each machine.
 
 ## Concepts
 
@@ -338,6 +363,7 @@ src/hexis/
 ├── guide.py              GUIDE.md and PROMPT.md
 └── cli/                  the hexis-agent command
 tests/                    hermetic test suite
+examples/machines/        four compiled example machines with their guides
 ```
 
 ### Python API

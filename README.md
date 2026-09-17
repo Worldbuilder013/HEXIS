@@ -1,5 +1,7 @@
 <div align="center">
 
+
+
 # HEXIS
 
 **Compile agent skills into extended finite state machines.**
@@ -28,7 +30,10 @@ guards over the recorded values to decide what comes next. Language models do th
 states, with the state's prompt and the variables it reads; the order of operations is enforced by the program.
 
 This package accompanies the paper *Compiling Agent Skills into Extended Finite State Machines*.
-
+<p align="center">
+<img src="docs/figures/showcase.jpg" width="880"
+     alt="hexis: a SKILL.md document is compiled into an extended finite state machine whose states, guards and variables enforce the order of operations while language models reason inside the states">
+</p>
 ## Highlights
 
 - **Compile with any OpenAI-compatible model.** Choose the model, endpoint and key variable on the command line
@@ -144,7 +149,8 @@ whether the run ends in `END_VERIFIED` or `END_UNVERIFIED`. They load and pass t
 model; running them needs a model endpoint:
 
 ```bash
-hexis-agent run --machine examples/machines/livemath --input request="..." --input output_path=answer.txt     --workdir work/ --executor local $M
+hexis-agent run --machine examples/machines/livemath --input request="..." --input output_path=answer.txt \
+    --workdir work/ --executor local $M
 ```
 
 See [examples/machines/README.md](examples/machines/README.md) for the flow of each machine.

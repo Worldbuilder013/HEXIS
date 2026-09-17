@@ -659,7 +659,7 @@
       "clause": "S4.38",
       "action": {
         "kind": "judge",
-        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes each line with its line number and a colon, and appends an '(End of file - total N lines)' footer; none of that framing is file content. Answer 'pass' if the content is exactly the single answer line final_line and nothing else of substance. Answer 'wrong_content' if the line differs, there is extra content, the file is empty, or the line is a placeholder such as '(no output)', 'unknown', 'TBD' or 'N/A' rather than an answer. Answer '弃权' if file_content is unreadable.",
+        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes each line with its line number and a colon, and appends an '(End of file - total N lines)' footer; none of that framing is file content. Answer 'pass' if the content is exactly the single answer line final_line and nothing else of substance. Answer 'wrong_content' if the line differs, there is extra content, the file is empty, or the line is a placeholder such as '(no output)', 'unknown', 'TBD' or 'N/A' rather than an answer. Answer 'abstain' if file_content is unreadable.",
         "reads": [
           "file_content",
           "final_line",
@@ -671,9 +671,9 @@
         "labels": [
           "pass",
           "wrong_content",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -696,7 +696,7 @@
           "origin": "document"
         },
         {
-          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "if": "verify_verdict == 'abstain' and repair_count < 2",
           "to": "s11",
           "inc": "repair_count",
           "support": 0,

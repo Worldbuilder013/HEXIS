@@ -409,7 +409,7 @@
       "clause": "S4.1.7",
       "action": {
         "kind": "judge",
-        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes every line with its line number and a colon, and appends an '(End of file - total N lines)' footer. None of that framing is file content; only the text after each line-number prefix is. Compare those content lines with the answer lines in run_out character by character: answer 'pass' if every answer line in run_out (the lines in the request's answer format) appears identically in file_content (every brace, bracket, quote and digit present) and file_content holds no other content line (a check line such as a shape or null count copied from run_out is extra text). Answer 'wrong_content' if an answer line is missing, a value or its format differs, there is an extra content line, or the file is empty. Answer '弃权' if file_content is unreadable.",
+        "prompt": "file_content is the answer file read back after writing, as returned by the read tool: the tool wraps the file in <path>, <type> and <content> tags, prefixes every line with its line number and a colon, and appends an '(End of file - total N lines)' footer. None of that framing is file content; only the text after each line-number prefix is. Compare those content lines with the answer lines in run_out character by character: answer 'pass' if every answer line in run_out (the lines in the request's answer format) appears identically in file_content (every brace, bracket, quote and digit present) and file_content holds no other content line (a check line such as a shape or null count copied from run_out is extra text). Answer 'wrong_content' if an answer line is missing, a value or its format differs, there is an extra content line, or the file is empty. Answer 'abstain' if file_content is unreadable.",
         "reads": [
           "file_content",
           "run_out",
@@ -421,9 +421,9 @@
         "labels": [
           "pass",
           "wrong_content",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -446,7 +446,7 @@
           "origin": "document"
         },
         {
-          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "if": "verify_verdict == 'abstain' and repair_count < 2",
           "to": "s9",
           "inc": "repair_count",
           "support": 0,

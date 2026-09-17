@@ -134,7 +134,7 @@
       "clause": "S2.1.3",
       "action": {
         "kind": "judge",
-        "prompt": "Decide whether inspect_report gives enough structural evidence to commit to boundary_model. Answer 'sufficient' by default: the report already shows the sheets, the header row, the populated region and the formulas. Answer 'insufficient' ONLY if the request refers to a sheet, table or range that the report does not show at all, or followup_targets names something concrete that was never inspected. Answer '弃权' only if the report is empty or unreadable. Answer 'insufficient' also when the CELLS section is empty or missing although the sheet has data (the script printed nothing there), or when the inspection output itself is broken: it contains 'Traceback' or 'ERROR', a section printed nothing, or the header row and the cells around the empty target/result area were not printed - a judgement made on a half-failed inspection is not a judgement.",
+        "prompt": "Decide whether inspect_report gives enough structural evidence to commit to boundary_model. Answer 'sufficient' by default: the report already shows the sheets, the header row, the populated region and the formulas. Answer 'insufficient' ONLY if the request refers to a sheet, table or range that the report does not show at all, or followup_targets names something concrete that was never inspected. Answer 'abstain' only if the report is empty or unreadable. Answer 'insufficient' also when the CELLS section is empty or missing although the sheet has data (the script printed nothing there), or when the inspection output itself is broken: it contains 'Traceback' or 'ERROR', a section printed nothing, or the header row and the cells around the empty target/result area were not printed - a judgement made on a half-failed inspection is not a judgement.",
         "reads": [
           "inspect_report",
           "boundary_model",
@@ -146,9 +146,9 @@
         "labels": [
           "sufficient",
           "insufficient",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -157,7 +157,7 @@
       },
       "transitions": [
         {
-          "if": "(boundary_verdict == 'insufficient' or boundary_verdict == '弃权') and inspect_count < 2",
+          "if": "(boundary_verdict == 'insufficient' or boundary_verdict == 'abstain') and inspect_count < 2",
           "to": "s1",
           "inc": "inspect_count",
           "support": 0,
@@ -369,7 +369,7 @@
       "clause": "S2.3.3",
       "action": {
         "kind": "judge",
-        "prompt": "Judge verify_report. Step 1 - find every line that starts with 'FLAG' in the report. If there is at least one FLAG line, the answer is 'wrong_cells', except in exactly two cases: (a) the only FLAG is 'overwrote existing non-empty cells' AND the request explicitly asks to change those very cells (fix this formula, fill this column, reformat these cells) - then continue to step 2; (b) the only FLAG is 'target cells still empty' AND edit_plan contains 'blanks intended' - then continue to step 2. Step 2 - only if no FLAG line stops you: look at the computed values (section 3): if they are what the request asks for and consistent with the examples already in the block (same kind of value, same spelling and case), answer 'pass'; a text string where the examples are numbers, dates or times (e.g. '06:08:00 下午' next to datetime.time examples) is 'wrong_cells'; if they contradict the request or the examples, answer 'wrong_cells'. Answer 'boundary_wrong' instead of 'wrong_cells' when the FLAGs show the cells were written to the wrong place (header row, a column that already held data or formulas for every record, or somewhere other than where the request or the layout puts the result). Answer '弃权' only if the report has none of the sections 1-4. Never answer 'pass' while a FLAG line is present, unless case (a) or (b) applies.",
+        "prompt": "Judge verify_report. Step 1 - find every line that starts with 'FLAG' in the report. If there is at least one FLAG line, the answer is 'wrong_cells', except in exactly two cases: (a) the only FLAG is 'overwrote existing non-empty cells' AND the request explicitly asks to change those very cells (fix this formula, fill this column, reformat these cells) - then continue to step 2; (b) the only FLAG is 'target cells still empty' AND edit_plan contains 'blanks intended' - then continue to step 2. Step 2 - only if no FLAG line stops you: look at the computed values (section 3): if they are what the request asks for and consistent with the examples already in the block (same kind of value, same spelling and case), answer 'pass'; a text string where the examples are numbers, dates or times (e.g. '06:08:00 下午' next to datetime.time examples) is 'wrong_cells'; if they contradict the request or the examples, answer 'wrong_cells'. Answer 'boundary_wrong' instead of 'wrong_cells' when the FLAGs show the cells were written to the wrong place (header row, a column that already held data or formulas for every record, or somewhere other than where the request or the layout puts the result). Answer 'abstain' only if the report has none of the sections 1-4. Never answer 'pass' while a FLAG line is present, unless case (a) or (b) applies.",
         "reads": [
           "verify_report",
           "edit_plan",
@@ -382,9 +382,9 @@
           "pass",
           "wrong_cells",
           "boundary_wrong",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -421,7 +421,7 @@
           "origin": "document"
         },
         {
-          "if": "audit_verdict == '弃权' and s7g_count < 3",
+          "if": "audit_verdict == 'abstain' and s7g_count < 3",
           "to": "s7g",
           "inc": "s7g_count",
           "support": 0,
@@ -550,9 +550,9 @@
         "labels": [
           "again",
           "continue",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -601,9 +601,9 @@
         "labels": [
           "s7g",
           "s10",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -645,9 +645,9 @@
         "labels": [
           "again",
           "continue",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,

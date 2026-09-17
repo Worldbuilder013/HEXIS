@@ -214,7 +214,7 @@
       "clause": "S3",
       "action": {
         "kind": "judge",
-        "prompt": "file_content is the answer file read back after writing. Answer 'pass' if it contains exactly one \\\\boxed{X} whose letter X equals answer_letter and nothing else of substance (a line-number prefix from the read tool is fine). Answer 'wrong_content' if the letter differs, the backslash is missing, there is extra text, or the file is empty. Answer '弃权' if file_content is unreadable.",
+        "prompt": "file_content is the answer file read back after writing. Answer 'pass' if it contains exactly one \\\\boxed{X} whose letter X equals answer_letter and nothing else of substance (a line-number prefix from the read tool is fine). Answer 'wrong_content' if the letter differs, the backslash is missing, there is extra text, or the file is empty. Answer 'abstain' if file_content is unreadable.",
         "reads": [
           "file_content",
           "answer_letter"
@@ -225,9 +225,9 @@
         "labels": [
           "pass",
           "wrong_content",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,
@@ -250,7 +250,7 @@
           "origin": "document"
         },
         {
-          "if": "verify_verdict == '弃权' and repair_count < 2",
+          "if": "verify_verdict == 'abstain' and repair_count < 2",
           "to": "s5",
           "inc": "repair_count",
           "support": 0,
@@ -367,7 +367,7 @@
       "clause": "S2",
       "action": {
         "kind": "judge",
-        "prompt": "answer_letter names the option chosen from request. If that option is the META option ('one of the remaining options is correct, but a stronger result can be proven'), answer 'complete'. Otherwise list, from the sentences of request that state a conclusion (not the question sentence), every conclusion clause: the bound or identity, its exact range and quantifiers, the equality or rigidity case, the characterization direction (one-way or 'exactly when'), exceptional cases. Answer 'complete' only if the chosen option states every one of those clauses; answer 'incomplete' if it drops any of them or if the context states no conclusion at all while a META option exists. Answer '弃权' if request is unreadable.",
+        "prompt": "answer_letter names the option chosen from request. If that option is the META option ('one of the remaining options is correct, but a stronger result can be proven'), answer 'complete'. Otherwise list, from the sentences of request that state a conclusion (not the question sentence), every conclusion clause: the bound or identity, its exact range and quantifiers, the equality or rigidity case, the characterization direction (one-way or 'exactly when'), exceptional cases. Answer 'complete' only if the chosen option states every one of those clauses; answer 'incomplete' if it drops any of them or if the context states no conclusion at all while a META option exists. Answer 'abstain' if request is unreadable.",
         "reads": [
           "request",
           "analysis",
@@ -379,9 +379,9 @@
         "labels": [
           "complete",
           "incomplete",
-          "弃权"
+          "abstain"
         ],
-        "abstain": "弃权",
+        "abstain": "abstain",
         "examples": [],
         "error_rate": 0.0,
         "support": 0,

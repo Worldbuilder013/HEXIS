@@ -74,9 +74,8 @@ assert structural_findings(machine) == []
 
 ## Notes
 
-- The machines were compiled with an earlier version of hexis: the abstain label of their `judge` states is the
-  legacy label rather than `abstain`. hexis loads both and treats them the same (see `ABSTAIN_LABELS` in
-  `hexis.machine.schema`).
+- Every `judge` state lists `abstain` among its labels: a judge that cannot decide abstains, and the transitions
+  send an abstention back to a repair step or on to `FALLBACK` instead of forcing an answer.
 - The `bash` commands assume a POSIX shell and `python3` on `PATH`; `dabench` and `sealqa` also expect the task to
   provide a writable `work_dir`.
 - These machines are not part of the hermetic test suite and have no skill document or traces in this repository;

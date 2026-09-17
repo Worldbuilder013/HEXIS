@@ -51,19 +51,14 @@ This package accompanies the paper *Compiling Agent Skills into Extended Finite 
 
 ## How it works
 
-```mermaid
-flowchart LR
-    doc["SKILL.md + compile.json"] --> compile["compile<br/>model drafts M0,<br/>checks give feedback"]
-    reg["Tool registry"] --> compile
-    compile --> build[("build directory<br/>machine.json")]
-    traces["New traces"] --> update["update<br/>model decides each step<br/>check · replay · accept"]
-    build --> update --> build
-    build --> guide["GUIDE.md + PROMPT.md"]
-    build --> run["run<br/>states · guards · counters"]
-    run -- "tool calls" --> tools["OpenCode / local bash"]
-    run -- "inside states" --> llm["Language model"]
-    run -- "retries exhausted" --> interp["Interpreted execution<br/>of SKILL.md"]
-```
+<p align="center">
+  <img src="docs/figures/overview.png" width="820"
+       alt="Native skill execution, where the model infers the next operation, compared with hexis, where a program evaluates the transition condition and selects the next state">
+</p>
+
+*Native execution uses model inference to select the next operation; skill optimization, reflection and memory
+improve the model's inputs. hexis uses a program to evaluate transition conditions and execute the operation
+assigned to the selected state.*
 
 1. **Compile.** The model reads the skill document, its clauses, the tool definitions, the task input fields and
    the skill rules, and drafts a machine. Static checks (format, schema, guards, reachability and termination,

@@ -7,7 +7,7 @@
 **Compile agent skills into extended finite state machines.**
 
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](#installation)
-[![License](https://img.shields.io/badge/license-MIT-green)](#license)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](CHANGELOG.md)
 
 [Why](#why-hexis) · [Installation](#installation) · [Quick start](#quick-start) · [Examples](#example-machines) · [Concepts](#concepts) ·

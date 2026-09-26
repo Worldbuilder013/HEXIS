@@ -414,7 +414,7 @@ hexis works with.
 ```bibtex
 @misc{li2026hexiscompilingskillsextended,
       title={HEXIS: Compiling Skills into Extended Finite State Machines}, 
-      author={Minghao LI},
+      author={},
       year={2026},
       eprint={2609.30123},
       archivePrefix={arXiv},
